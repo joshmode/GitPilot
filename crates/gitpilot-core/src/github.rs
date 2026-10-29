@@ -1025,6 +1025,18 @@ pub struct WireRepositoryPermission {
     pub permission: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct WireBranchSummary {
+    pub name: String,
+    pub protected: Option<bool>,
+    pub commit: WireBranchCommit,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WireBranchCommit {
+    pub sha: String,
+}
+
 const PROJECTS_QUERY: &str = r#"
 query GitPilotProjects($owner: String!, $cursor: String) {
   repositoryOwner(login: $owner) {
@@ -2085,6 +2097,28 @@ impl GitHubService {
                 .await?;
         }
         self.sync_security(repo, &client, cancel).await?;
+        let branches: Vec<WireBranchSummary> = client
+            .get_paged(
+                &format!("/repos/{}/{}/branches?per_page=100", repo.owner, repo.name),
+                2,
+                cancel,
+            )
+            .await
+            .unwrap_or_default();
+        self.store
+            .replace_repository_branches(
+                &repo.id,
+                &branches
+                    .into_iter()
+                    .map(|branch| RepositoryBranch {
+                        name: branch.name,
+                        head_sha: branch.commit.sha,
+                        protected: branch.protected.unwrap_or(false),
+                        observed_at: Utc::now(),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
         let releases: Vec<WireRelease> = client
             .get_paged(
                 &format!("/repos/{}/{}/releases?per_page=15", repo.owner, repo.name),

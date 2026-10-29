@@ -103,6 +103,13 @@ async fn migration_upgrades_an_existing_v1_database() {
     .await
     .unwrap();
     assert_eq!(embedding_columns, 1);
+    let branch_table: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='repository_branches'",
+    )
+    .fetch_one(reopened.pool())
+    .await
+    .unwrap();
+    assert_eq!(branch_table, 1);
 }
 
 #[tokio::test]
@@ -141,6 +148,54 @@ async fn github_projects_round_trip_with_explicit_item_state() {
     );
     let bootstrap = service.bootstrap().await.unwrap();
     assert_eq!(bootstrap.github_projects.len(), 1);
+}
+
+#[tokio::test]
+async fn repository_branch_overview_round_trips_and_is_cleared_with_local_data() {
+    let temp = TempDir::new().unwrap();
+    let service = demo_service(&temp).await;
+    service
+        .store
+        .replace_repository_branches(
+            "repo-0001",
+            &[
+                gitpilot_core::RepositoryBranch {
+                    name: "main".into(),
+                    head_sha: "a".repeat(40),
+                    protected: true,
+                    observed_at: chrono::Utc::now(),
+                },
+                gitpilot_core::RepositoryBranch {
+                    name: "release/1.0".into(),
+                    head_sha: "b".repeat(40),
+                    protected: false,
+                    observed_at: chrono::Utc::now(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    let rows = service
+        .store
+        .repository_branches("repo-0001")
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .find(|row| row.name == "main")
+            .unwrap()
+            .protected
+    );
+    service.delete_all_data().await.unwrap();
+    assert!(
+        service
+            .store
+            .repository_branches("repo-0001")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

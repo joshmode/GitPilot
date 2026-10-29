@@ -15,6 +15,32 @@ pub fn show(
     runtime: &tokio::runtime::Handle,
     tx: &UnboundedSender<UiEvent>,
 ) {
+    if !state.branch_overview_repo.as_ref().is_some_and(|repo| {
+        state
+            .bootstrap
+            .repositories
+            .iter()
+            .any(|row| &row.id == repo)
+    }) {
+        state.branch_overview_repo = state.repository_scope.clone().or_else(|| {
+            state
+                .bootstrap
+                .repositories
+                .first()
+                .map(|repo| repo.id.clone())
+        });
+    }
+    if state.branch_overview.is_empty()
+        && let Some(repository_id) = state.branch_overview_repo.clone()
+    {
+        let service = Arc::clone(service);
+        let tx = tx.clone();
+        runtime.spawn(async move {
+            if let Ok(branches) = service.store.repository_branches(&repository_id).await {
+                let _ = tx.send(UiEvent::BranchOverview(branches));
+            }
+        });
+    }
     let mut sync_repo = None;
     let mut workspace_repo: Option<String> = None;
     let mut sync_all = false;
@@ -76,6 +102,49 @@ pub fn show(
             );
         });
     });
+    if let Some(repository_id) = state.branch_overview_repo.clone() {
+        let repository_name = state
+            .bootstrap
+            .repositories
+            .iter()
+            .find(|repo| repo.id == repository_id)
+            .map(|repo| repo.full_name.clone())
+            .unwrap_or_else(|| "repository".into());
+        components::section_header(
+            ui,
+            tokens,
+            "Branch overview",
+            Some(&format!("GitHub branch heads for {repository_name}")),
+        );
+        if state.branch_overview.is_empty() {
+            ui.label(
+                RichText::new(
+                    "No branch metadata is cached. Sync the repository to fetch up to 200 branches; this does not imply there are no branches.",
+                )
+                .size(10.5)
+                .color(tokens.text_faint),
+            );
+        }
+        for branch in state.branch_overview.iter().take(50) {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(&branch.name)
+                        .monospace()
+                        .size(10.5)
+                        .color(tokens.text),
+                );
+                components::badge(
+                    ui,
+                    tokens,
+                    &branch.head_sha.chars().take(8).collect::<String>(),
+                    tokens.info,
+                );
+                if branch.protected {
+                    components::badge(ui, tokens, "protected", tokens.success);
+                }
+            });
+        }
+    }
     ui.add_space(8.0);
     egui::ScrollArea::vertical()
         .id_salt("repo_list")

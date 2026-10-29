@@ -438,6 +438,14 @@ pub struct GitHubProject {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepositoryBranch {
+    pub name: String,
+    pub head_sha: String,
+    pub protected: bool,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitHubProjectItem {
     pub id: Id,
     pub content_type: String,

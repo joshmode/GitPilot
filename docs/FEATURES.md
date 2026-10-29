@@ -11,7 +11,7 @@ service implementation.
 | SQLite persistence | Implemented | WAL, foreign keys, versioned migrations v1→v4, FTS5, search source mirror, indexed list queries |
 | Background jobs | Implemented | Persisted queue, dedupe, recovery, retry, cancellation, bounded dispatcher and UI inspector; sync/review jobs dispatch through registered handlers |
 | GitHub repository discovery | Implemented | REST `/user/repos`, pagination, account-scoped persistence |
-| GitHub PR/issue/release sync | Implemented | Full bounded pagination, ETag conditional requests, PR details/checks/reviews/files, merged/closed windows, milestones, releases |
+| GitHub PR/issue/release sync | Implemented | Full bounded pagination, ETag conditional requests, PR details/checks/reviews/files, merged/closed windows, milestones, releases and bounded branch overview |
 | GitHub commits sync | Implemented | Bounded default-branch history sync (up to 300 commits), parent/author/verification metadata and PR linkage; no full-history mirror |
 | GitHub reviews | Implemented | Read comments/decisions with current-head logic; guarded human summary review and validated line comments |
 | Guarded GitHub write test | Implemented | Create-issue path requires write permission plus a typed confirmation; demo repositories cannot be mutated |

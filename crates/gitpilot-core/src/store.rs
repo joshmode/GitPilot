@@ -788,6 +788,52 @@ impl Store {
         Ok(projects)
     }
 
+    pub async fn replace_repository_branches(
+        &self,
+        repository_id: &str,
+        branches: &[RepositoryBranch],
+    ) -> Result<()> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DELETE FROM repository_branches WHERE repository_id = ?")
+            .bind(repository_id)
+            .execute(&mut *transaction)
+            .await?;
+        for branch in branches.iter().take(200) {
+            sqlx::query(
+                "INSERT INTO repository_branches(repository_id, name, head_sha, protected, observed_at)
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(repository_id)
+            .bind(&branch.name)
+            .bind(&branch.head_sha)
+            .bind(branch.protected as i64)
+            .bind(branch.observed_at.to_rfc3339())
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn repository_branches(&self, repository_id: &str) -> Result<Vec<RepositoryBranch>> {
+        let rows = sqlx::query(
+            "SELECT name, head_sha, protected, observed_at FROM repository_branches
+             WHERE repository_id = ? ORDER BY name",
+        )
+        .bind(repository_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| RepositoryBranch {
+                name: row.get("name"),
+                head_sha: row.get("head_sha"),
+                protected: row.get::<i64, _>("protected") != 0,
+                observed_at: parse_time(row.get("observed_at")),
+            })
+            .collect())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_webhook_event(
         &self,
@@ -2366,6 +2412,7 @@ impl Store {
             "webhook_events",
             "github_project_items",
             "github_projects",
+            "repository_branches",
             "audit_events",
             "provider_usage",
             "ai_artifacts",

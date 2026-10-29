@@ -292,6 +292,9 @@ impl GitPilotApp {
                 UiEvent::ChangeImpactSignals(signals) => {
                     self.state.change_impact_signals = signals;
                 }
+                UiEvent::BranchOverview(branches) => {
+                    self.state.branch_overview = branches;
+                }
                 UiEvent::AiStreamDelta(delta) => {
                     self.state.ai_stream_text.push_str(&delta);
                 }
