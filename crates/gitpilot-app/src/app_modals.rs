@@ -84,6 +84,7 @@ impl GitPilotApp {
         let mut close = false;
         let mut connect = false;
         let mut discover = None;
+        let mut disconnect = None;
         let mut start_device = false;
         components::centered_modal(ctx, &self.tokens, 520.0, |ui| {
             ui.horizontal(|ui| {
@@ -101,7 +102,7 @@ impl GitPilotApp {
             });
             ui.label(
                 RichText::new(
-                    "Use a fine-grained PAT with read-only repository, issue, pull request, checks and content access. The token is stored in the macOS Keychain, never SQLite.",
+                    "Use a fine-grained PAT with read-only repository, issue, pull request, checks and content access. The token is stored in the OS credential store, never SQLite. Linux builds require a reviewed Secret Service adapter.",
                 )
                 .size(11.5)
                 .color(self.tokens.text_muted),
@@ -148,6 +149,9 @@ impl GitPilotApp {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if ui.small_button("Discover repositories").clicked() {
                                 discover = Some(account.id.clone());
+                            }
+                            if ui.small_button("Disconnect").clicked() {
+                                disconnect = Some(account.id.clone());
                             }
                         });
                     });
@@ -203,6 +207,23 @@ impl GitPilotApp {
         }
         if let Some(account) = discover {
             self.discover(account);
+        }
+        if let Some(account_id) = disconnect {
+            let service = Arc::clone(&self.service);
+            let tx = self.tx.clone();
+            self.runtime.spawn(async move {
+                match service.disconnect_github(&account_id).await {
+                    Ok(()) => {
+                        let _ = tx.send(UiEvent::Toast(
+                            "GitHub account disconnected and credential removed.".into(),
+                        ));
+                        let _ = tx.send(UiEvent::BootstrapRefreshed);
+                    }
+                    Err(error) => {
+                        let _ = tx.send(UiEvent::Error(error.user_message()));
+                    }
+                }
+            });
         }
         if start_device {
             let client_id = self.state.github_client_id.clone();
@@ -528,6 +549,7 @@ impl GitPilotApp {
         let mut save = false;
         let mut test = false;
         let mut discover = false;
+        let mut revoke = false;
         components::centered_modal(ctx, &self.tokens, 560.0, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
@@ -653,6 +675,9 @@ impl GitPilotApp {
                     if ui.button("Discover models").clicked() {
                         discover = true;
                     }
+                    if provider.has_credential && ui.button("Revoke API key").clicked() {
+                        revoke = true;
+                    }
                 });
             }
         });
@@ -716,6 +741,24 @@ impl GitPilotApp {
                     }
                 }
             });
+        }
+        if revoke && let Some(id) = self.state.selected_provider.clone() {
+            let service = Arc::clone(&self.service);
+            let tx = self.tx.clone();
+            self.runtime.spawn(async move {
+                match service.revoke_provider_credential(&id).await {
+                    Ok(()) => {
+                        let _ = tx.send(UiEvent::Toast(
+                            "Provider credential removed from the OS store.".into(),
+                        ));
+                        let _ = tx.send(UiEvent::BootstrapRefreshed);
+                    }
+                    Err(error) => {
+                        let _ = tx.send(UiEvent::Error(error.user_message()));
+                    }
+                }
+            });
+            self.state.provider_api_key.clear();
         }
     }
 

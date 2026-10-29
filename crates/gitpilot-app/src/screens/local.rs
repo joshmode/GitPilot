@@ -395,10 +395,9 @@ pub fn show(
                             description: "Check formatting".into(),
                         },
                     };
-                    state.confirm_action = state
-                        .confirm_action
-                        .clone()
-                        .or(Some(format!("command:{}", label)));
+                    state.local_command_output = Some(format!(
+                        "Starting {label} in the configured sandbox. This command was selected explicitly by the user; no model-generated shell is executed."
+                    ));
                     let service = Arc::clone(service);
                     let tx = tx.clone();
                     runtime.spawn(async move {

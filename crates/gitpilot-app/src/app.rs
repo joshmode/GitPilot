@@ -23,6 +23,7 @@ pub struct GitPilotApp {
     last_sync_tick: Instant,
     last_device_poll: Instant,
     sync_inflight: bool,
+    last_automation_tick: Instant,
     started: Instant,
     pub(crate) modal: Modal,
     palette: Option<Palette>,
@@ -69,7 +70,12 @@ impl GitPilotApp {
             Theme::Dark => Tokens::dark(),
             Theme::Light => Tokens::light(),
         };
-        let state = UiState::from_bootstrap(bootstrap);
+        let mut state = UiState::from_bootstrap(bootstrap);
+        if !state.bootstrap.settings.onboarding_complete {
+            state.screen = Screen::Onboarding;
+        }
+        state.native_notification_status =
+            gitpilot_core::native_notifications::status().label().into();
         Self {
             service,
             runtime,
@@ -82,6 +88,7 @@ impl GitPilotApp {
             last_sync_tick: Instant::now(),
             last_device_poll: Instant::now(),
             sync_inflight: false,
+            last_automation_tick: Instant::now(),
             started: Instant::now(),
             modal: Modal::None,
             palette: None,
@@ -200,6 +207,8 @@ impl GitPilotApp {
                     self.state.recent_search = recent_search;
                     self.state.notifications = self.state.bootstrap.notifications.clone();
                     self.state.jobs = self.state.bootstrap.jobs.clone();
+                    self.state.native_notification_status =
+                        gitpilot_core::native_notifications::status().label().into();
                     self.tokens = match theme {
                         Theme::Dark => Tokens::dark(),
                         Theme::Light => Tokens::light(),
@@ -300,14 +309,20 @@ impl GitPilotApp {
                     self.state.saved_pr_views = views;
                 }
                 UiEvent::PrDetail(detail) => {
-                    if let Some(run) = detail.latest_review_run.clone() {
-                        self.state.review_run = Some(run);
+                    // Ignore a late response for a PR the user already left.
+                    if self.state.selected_pr.as_deref() == Some(detail.pull_request.id.as_str()) {
+                        if let Some(run) = detail.latest_review_run.clone() {
+                            self.state.review_run = Some(run);
+                        }
+                        self.state.pr_detail = Some(*detail);
+                        self.state.busy = None;
                     }
-                    self.state.pr_detail = Some(*detail);
-                    self.state.busy = None;
                 }
                 UiEvent::ReviewHistory(runs) => {
                     self.state.review_history = runs;
+                }
+                UiEvent::ReviewerRecommendations(rows) => {
+                    self.state.reviewer_recommendations = rows;
                 }
                 UiEvent::PrList { rows, total } => {
                     self.state.pr_rows = rows;
@@ -348,6 +363,9 @@ impl GitPilotApp {
                 }
                 UiEvent::AutomationRuns(runs) => {
                     self.state.automation_runs = runs;
+                }
+                UiEvent::WebhookEvents(events) => {
+                    self.state.webhook_events = events;
                 }
                 UiEvent::Health(health) => {
                     self.state.health = health;
@@ -728,6 +746,27 @@ impl eframe::App for GitPilotApp {
             self.last_sync_tick = Instant::now();
             self.sync_now();
             ctx.request_repaint_after(Duration::from_secs(2));
+        }
+        if self.state.bootstrap.permissions.scheduled_automations
+            && self.last_automation_tick.elapsed() >= Duration::from_secs(15 * 60)
+        {
+            self.last_automation_tick = Instant::now();
+            let service = Arc::clone(&self.service);
+            let tx = self.tx.clone();
+            self.runtime.spawn(async move {
+                match service.run_scheduled_automations().await {
+                    Ok(count) if count > 0 => {
+                        let _ = tx.send(UiEvent::Toast(format!(
+                            "Scheduled automations completed {count} run(s)."
+                        )));
+                        let _ = tx.send(UiEvent::BootstrapRefreshed);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        let _ = tx.send(UiEvent::Error(error.user_message()));
+                    }
+                }
+            });
         }
         if let Some((_, _, when)) = &self.toast
             && when.elapsed() > Duration::from_secs(5)

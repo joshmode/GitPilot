@@ -146,6 +146,16 @@ pub async fn dashboard(store: &Store) -> Result<Dashboard> {
                 url: Some(pr.html_url.clone()),
             });
         }
+        if pr.review_state == ReviewState::ChangesRequested && !pr.draft {
+            alerts.push(Alert {
+                id: format!("changes-{}", pr.id),
+                severity: Severity::High,
+                title: format!("Changes requested on #{}", pr.number),
+                detail: "A human reviewer requested changes; inspect the review discussion.".into(),
+                object_id: Some(pr.id.clone()),
+                url: Some(pr.html_url.clone()),
+            });
+        }
     }
     alerts.sort_by_key(|a| std::cmp::Reverse(a.severity));
     let activity = recent_activity(&all_prs, &issues, &releases);
@@ -412,6 +422,105 @@ pub fn contributors(prs: &[PullRequest], issues: &[Issue], commits: &[Commit]) -
         }
     }
     people.into_values().collect()
+}
+
+/// Suggest reviewers from explicit ownership, requested-review history and
+/// current review load. Suggestions never assign or notify anyone.
+pub fn reviewer_recommendations(
+    pr: &PullRequest,
+    contributors: &[Contributor],
+    changed_paths: &[String],
+) -> Vec<ReviewerRecommendation> {
+    let mut recommendations = Vec::new();
+    for contributor in contributors {
+        if contributor.login == pr.author {
+            continue;
+        }
+        let mut reasons = Vec::new();
+        for path in changed_paths.iter().take(100) {
+            if contributor
+                .owned_paths
+                .iter()
+                .any(|owned| path_matches_owner(path, owned))
+            {
+                reasons.push(EvidenceStatement {
+                    text: format!("Explicit ownership or CODEOWNERS match for {path}."),
+                    kind: EvidenceKind::Observed,
+                    evidence: vec![EvidenceRef {
+                        label: path.clone(),
+                        url: None,
+                        object_id: Some(pr.id.clone()),
+                        kind: EvidenceKind::Observed,
+                    }],
+                });
+                break;
+            }
+        }
+        if pr
+            .requested_reviewers
+            .iter()
+            .any(|r| r == &contributor.login)
+        {
+            reasons.push(EvidenceStatement {
+                text: "Already requested by GitHub on this pull request.".into(),
+                kind: EvidenceKind::Observed,
+                evidence: vec![EvidenceRef {
+                    label: format!("PR #{} reviewers", pr.number),
+                    url: Some(pr.html_url.clone()),
+                    object_id: Some(pr.id.clone()),
+                    kind: EvidenceKind::Observed,
+                }],
+            });
+        }
+        if contributor.pending_reviews > 0 {
+            reasons.push(EvidenceStatement {
+                text: format!(
+                    "Current review workload: {} pending request(s); lower load is preferable.",
+                    contributor.pending_reviews
+                ),
+                kind: EvidenceKind::Derived,
+                evidence: vec![],
+            });
+        }
+        if reasons.is_empty() {
+            continue;
+        }
+        let ownership = reasons.iter().any(|reason| {
+            matches!(reason.kind, EvidenceKind::Observed) && reason.text.contains("ownership")
+        });
+        let confidence = if ownership { 0.85 } else { 0.55 };
+        recommendations.push(ReviewerRecommendation {
+            login: contributor.login.clone(),
+            reasons,
+            confidence,
+            workload_requests: contributor.pending_reviews + contributor.review_requests,
+        });
+    }
+    recommendations.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.workload_requests.cmp(&b.workload_requests))
+    });
+    recommendations.truncate(8);
+    recommendations
+}
+
+fn path_matches_owner(path: &str, pattern: &str) -> bool {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return false;
+    }
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        return path == prefix || path.starts_with(&format!("{prefix}/"));
+    }
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return path.starts_with(prefix);
+    }
+    if let Some(suffix) = pattern.strip_prefix('*') {
+        return path.ends_with(suffix);
+    }
+    path == pattern
 }
 
 fn empty_contributor(login: &str) -> Contributor {

@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 const MIGRATION: &str = include_str!("../../../migrations/0001_init.sql");
 const MIGRATION_2: &str = include_str!("../../../migrations/0002_pr_commit_count.sql");
+const MIGRATION_3: &str = include_str!("../../../migrations/0003_projects_webhooks.sql");
 
 #[derive(Clone)]
 pub struct Store {
@@ -653,6 +654,183 @@ impl Store {
                 fetched_at: parse_time(row.get("fetched_at")),
             })
             .collect())
+    }
+
+    pub async fn save_github_project(&self, project: &GitHubProject) -> Result<()> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO github_projects(id, account_id, owner_login, number, title,
+               description, url, closed, synced_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               title=excluded.title, description=excluded.description,
+               url=excluded.url, closed=excluded.closed, synced_at=excluded.synced_at",
+        )
+        .bind(&project.id)
+        .bind(&project.account_id)
+        .bind(&project.owner_login)
+        .bind(project.number)
+        .bind(&project.title)
+        .bind(&project.description)
+        .bind(&project.url)
+        .bind(project.closed as i64)
+        .bind(project.synced_at.to_rfc3339())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("DELETE FROM github_project_items WHERE project_id = ?")
+            .bind(&project.id)
+            .execute(&mut *transaction)
+            .await?;
+        for item in &project.items {
+            sqlx::query(
+                "INSERT INTO github_project_items(id, project_id, content_type, content_id,
+                   title, state, url, repository_name, updated_at, synced_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&item.id)
+            .bind(&project.id)
+            .bind(&item.content_type)
+            .bind(&item.content_id)
+            .bind(&item.title)
+            .bind(&item.state)
+            .bind(&item.url)
+            .bind(&item.repository_name)
+            .bind(item.updated_at.map(|value| value.to_rfc3339()))
+            .bind(project.synced_at.to_rfc3339())
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn codeowners(&self, repository_id: &str) -> Result<Vec<CodeownerRule>> {
+        let row = sqlx::query_scalar::<_, String>(
+            "SELECT content FROM knowledge_records
+             WHERE repository_id = ? AND kind = 'codeowners'
+             ORDER BY observed_at DESC LIMIT 1",
+        )
+        .bind(repository_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(content) = row else {
+            return Ok(Vec::new());
+        };
+        Ok(parse_codeowners(&content))
+    }
+
+    pub async fn github_projects(&self, account_id: Option<&str>) -> Result<Vec<GitHubProject>> {
+        let rows = if let Some(account_id) = account_id {
+            sqlx::query(
+                "SELECT * FROM github_projects WHERE account_id = ? ORDER BY synced_at DESC",
+            )
+            .bind(account_id)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query("SELECT * FROM github_projects ORDER BY synced_at DESC")
+                .fetch_all(&self.pool)
+                .await?
+        };
+        let mut projects = Vec::new();
+        for row in rows {
+            let id: String = row.get("id");
+            let item_rows = sqlx::query(
+                "SELECT * FROM github_project_items WHERE project_id = ? ORDER BY title",
+            )
+            .bind(&id)
+            .fetch_all(&self.pool)
+            .await?;
+            projects.push(GitHubProject {
+                id,
+                account_id: row.get("account_id"),
+                owner_login: row.get("owner_login"),
+                number: row.get("number"),
+                title: row.get("title"),
+                description: row.get("description"),
+                url: row.get("url"),
+                closed: row.get::<i64, _>("closed") != 0,
+                synced_at: parse_time(row.get("synced_at")),
+                items: item_rows
+                    .into_iter()
+                    .map(|item| GitHubProjectItem {
+                        id: item.get("id"),
+                        content_type: item.get("content_type"),
+                        content_id: item.get("content_id"),
+                        title: item.get("title"),
+                        state: item.get("state"),
+                        url: item.get("url"),
+                        repository_name: item.get("repository_name"),
+                        updated_at: item
+                            .try_get::<Option<String>, _>("updated_at")
+                            .ok()
+                            .flatten()
+                            .map(parse_time),
+                    })
+                    .collect(),
+            });
+        }
+        Ok(projects)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_webhook_event(
+        &self,
+        delivery_id: &str,
+        event: &str,
+        action: Option<&str>,
+        repository_full_name: Option<&str>,
+        payload_sha256: &str,
+        payload: &serde_json::Value,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO webhook_events(delivery_id, event, action,
+               repository_full_name, received_at, payload_sha256, payload_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(delivery_id)
+        .bind(event)
+        .bind(action)
+        .bind(repository_full_name)
+        .bind(Utc::now().to_rfc3339())
+        .bind(payload_sha256)
+        .bind(serde_json::to_string(payload)?)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn webhook_events(&self, limit: i64) -> Result<Vec<WebhookEventRecord>> {
+        let rows = sqlx::query("SELECT * FROM webhook_events ORDER BY received_at DESC LIMIT ?")
+            .bind(limit.clamp(1, 500))
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| WebhookEventRecord {
+                delivery_id: row.get("delivery_id"),
+                event: row.get("event"),
+                action: row.get("action"),
+                repository_full_name: row.get("repository_full_name"),
+                received_at: parse_time(row.get("received_at")),
+                processed_at: row
+                    .try_get::<Option<String>, _>("processed_at")
+                    .ok()
+                    .flatten()
+                    .map(parse_time),
+                payload: serde_json::from_str(&row.get::<String, _>("payload_json"))
+                    .unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    pub async fn mark_webhook_processed(&self, delivery_id: &str) -> Result<()> {
+        sqlx::query("UPDATE webhook_events SET processed_at = ? WHERE delivery_id = ?")
+            .bind(Utc::now().to_rfc3339())
+            .bind(delivery_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn replace_security_alerts(
@@ -1931,6 +2109,9 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         for table in [
             "notifications",
+            "webhook_events",
+            "github_project_items",
+            "github_projects",
             "audit_events",
             "provider_usage",
             "ai_artifacts",
@@ -2114,6 +2295,18 @@ impl Store {
         Ok(())
     }
 
+    pub async fn prune_old_jobs(&self, older_than_days: i64) -> Result<()> {
+        let cutoff = (Utc::now() - Duration::days(older_than_days.max(1))).to_rfc3339();
+        sqlx::query(
+            "DELETE FROM jobs WHERE state IN ('completed','failed','cancelled')
+             AND updated_at < ?",
+        )
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn jobs(&self, limit: usize) -> Result<Vec<JobRecord>> {
         let rows = sqlx::query("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?")
             .bind(limit as i64)
@@ -2179,6 +2372,12 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
             .execute(pool)
             .await?;
         }
+    }
+    let version: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_migrations")
+        .fetch_one(pool)
+        .await?;
+    if version.unwrap_or(0) < 3 {
+        sqlx::query(MIGRATION_3).execute(pool).await?;
     }
     Ok(())
 }
@@ -2480,5 +2679,42 @@ fn parse_run_status(value: &str) -> ReviewRunStatus {
         "failed" => ReviewRunStatus::Failed,
         "cancelled" => ReviewRunStatus::Cancelled,
         _ => ReviewRunStatus::Queued,
+    }
+}
+
+/// Parse GitHub's CODEOWNERS subset. Comments are ignored; the last matching
+/// rule is the effective rule, matching GitHub's documented precedence.
+pub fn parse_codeowners(content: &str) -> Vec<CodeownerRule> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let pattern = parts.next()?;
+            let owners = parts
+                .filter(|owner| owner.starts_with('@'))
+                .map(|owner| owner.trim_start_matches('@').to_owned())
+                .collect::<Vec<_>>();
+            (!owners.is_empty()).then(|| CodeownerRule {
+                pattern: pattern.into(),
+                owners,
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod codeowner_tests {
+    use super::*;
+
+    #[test]
+    fn codeowners_parses_rules_and_ignores_comments() {
+        let rules =
+            parse_codeowners("# owners\n/src/auth/** @alice @acme/security\n*.md @docs\ninvalid\n");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].pattern, "/src/auth/**");
+        assert_eq!(rules[0].owners, vec!["alice", "acme/security"]);
+        assert_eq!(rules[1].owners, vec!["docs"]);
     }
 }

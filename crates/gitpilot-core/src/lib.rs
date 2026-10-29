@@ -17,10 +17,12 @@ pub mod jobs;
 pub mod knowledge;
 pub mod local_git;
 pub mod logging;
+pub mod native_notifications;
 pub mod permissions;
 pub mod review;
 pub mod service;
 pub mod store;
+pub mod webhooks;
 pub mod workflows;
 
 pub use ai::ProviderKind;

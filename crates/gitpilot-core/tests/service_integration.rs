@@ -77,6 +77,152 @@ async fn migration_upgrades_an_existing_v1_database() {
     .await
     .unwrap();
     assert_eq!(count, 1);
+    let project_tables: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('github_projects','github_project_items','webhook_events')",
+    )
+    .fetch_one(reopened.pool())
+    .await
+    .unwrap();
+    assert_eq!(project_tables, 3);
+    let version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM schema_migrations")
+        .fetch_one(reopened.pool())
+        .await
+        .unwrap();
+    assert_eq!(version, 3);
+}
+
+#[tokio::test]
+async fn github_projects_round_trip_with_explicit_item_state() {
+    let temp = TempDir::new().unwrap();
+    let service = demo_service(&temp).await;
+    let repo = service.store.repositories().await.unwrap().remove(0);
+    let project = gitpilot_core::GitHubProject {
+        id: "PVT_test".into(),
+        account_id: repo.account_id.clone(),
+        owner_login: repo.owner.clone(),
+        number: 1,
+        title: "Release readiness".into(),
+        description: "Milestone project".into(),
+        url: "https://github.com/orgs/example/projects/1".into(),
+        closed: false,
+        synced_at: chrono::Utc::now(),
+        items: vec![gitpilot_core::GitHubProjectItem {
+            id: "PVTI_1".into(),
+            content_type: "PullRequest".into(),
+            content_id: Some("PR_1".into()),
+            title: "Ship release".into(),
+            state: "Done".into(),
+            url: Some("https://github.com/example/repo/pull/1".into()),
+            repository_name: Some("example/repo".into()),
+            updated_at: Some(chrono::Utc::now()),
+        }],
+    };
+    service.store.save_github_project(&project).await.unwrap();
+    let rows = service.store.github_projects(None).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].items[0].state, "Done");
+    assert_eq!(
+        rows[0].items[0].repository_name.as_deref(),
+        Some("example/repo")
+    );
+    let bootstrap = service.bootstrap().await.unwrap();
+    assert_eq!(bootstrap.github_projects.len(), 1);
+}
+
+#[tokio::test]
+async fn verified_webhook_events_are_deduplicated() {
+    let temp = TempDir::new().unwrap();
+    let service = demo_service(&temp).await;
+    let receiver = gitpilot_core::webhooks::WebhookReceiver::new(
+        service.store.clone(),
+        b"0123456789abcdef0123456789abcdef",
+    )
+    .unwrap();
+    let body = br#"{"action":"opened","repository":{"full_name":"example/repo"}}"#;
+    assert!(
+        receiver
+            .ingest("pull_request", "delivery-1", body)
+            .await
+            .unwrap()
+            .1
+    );
+    assert!(
+        !receiver
+            .ingest("pull_request", "delivery-1", body)
+            .await
+            .unwrap()
+            .1
+    );
+    let events = service.store.webhook_events(10).await.unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].repository_full_name.as_deref(),
+        Some("example/repo")
+    );
+}
+
+#[tokio::test]
+async fn automation_builder_rejects_unauthorized_write_actions() {
+    let temp = TempDir::new().unwrap();
+    let service = demo_service(&temp).await;
+    let automation = Automation {
+        id: "automation-test".into(),
+        name: "Create issue automatically".into(),
+        enabled: false,
+        trigger: "pr_opened".into(),
+        conditions: vec!["repository:any".into()],
+        actions: vec!["create_issue".into()],
+        dry_run: true,
+        requires_approval: true,
+        repository_id: None,
+        policy: PermissionPolicy {
+            modify_github: true,
+            ..Default::default()
+        },
+        budget_usd: 0.0,
+        timeout_seconds: 300,
+        created_at: chrono::Utc::now(),
+        last_run_at: None,
+    };
+    assert!(service.save_automation(&automation).await.is_err());
+    let mut policy = service.store.load_permissions().await.unwrap();
+    policy.modify_github = true;
+    service.save_permissions(&policy).await.unwrap();
+    service.save_automation(&automation).await.unwrap();
+    let rows = service.automations().await.unwrap();
+    assert!(rows.iter().any(|row| row.id == "automation-test"));
+}
+
+#[tokio::test]
+async fn scheduled_automation_tick_is_permission_gated_and_idempotent() {
+    let temp = TempDir::new().unwrap();
+    let service = demo_service(&temp).await;
+    let automation = Automation {
+        id: "automation-scheduled".into(),
+        name: "Scheduled notification".into(),
+        enabled: true,
+        trigger: "scheduled_check".into(),
+        conditions: vec!["repository:any".into()],
+        actions: vec!["create_notification".into()],
+        dry_run: false,
+        requires_approval: true,
+        repository_id: None,
+        policy: PermissionPolicy {
+            scheduled_automations: true,
+            ..Default::default()
+        },
+        budget_usd: 0.0,
+        timeout_seconds: 300,
+        created_at: chrono::Utc::now(),
+        last_run_at: None,
+    };
+    assert!(service.save_automation(&automation).await.is_err());
+    let mut policy = service.store.load_permissions().await.unwrap();
+    policy.scheduled_automations = true;
+    service.save_permissions(&policy).await.unwrap();
+    service.save_automation(&automation).await.unwrap();
+    assert_eq!(service.run_scheduled_automations().await.unwrap(), 1);
+    assert_eq!(service.run_scheduled_automations().await.unwrap(), 0);
 }
 
 #[tokio::test]
@@ -545,11 +691,32 @@ async fn external_ai_requires_permission_and_local_only_blocks_it() {
 async fn data_deletion_clears_database_records() {
     let temp = TempDir::new().unwrap();
     let service = demo_service(&temp).await;
+    service
+        .store
+        .insert_webhook_event(
+            "delete-test",
+            "pull_request",
+            Some("opened"),
+            Some("example/repo"),
+            "hash",
+            &serde_json::json!({"action": "opened"}),
+        )
+        .await
+        .unwrap();
     service.delete_all_data().await.unwrap();
     let bootstrap = service.bootstrap().await.unwrap();
     assert!(bootstrap.repositories.is_empty());
     assert_eq!(bootstrap.stats.pull_requests, 0);
     assert!(!bootstrap.permissions.modify_github);
+    assert!(service.store.webhook_events(10).await.unwrap().is_empty());
+    assert!(
+        service
+            .store
+            .github_projects(None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

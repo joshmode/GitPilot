@@ -57,7 +57,7 @@ pub fn show(
         SettingsTab::Review => review(ui, state, tokens, service, runtime, tx),
         SettingsTab::Privacy => privacy(ui, state, tokens, service, runtime, tx),
         SettingsTab::Notifications => notifications(ui, state, tokens, service, runtime, tx),
-        SettingsTab::Sandbox => sandbox(ui, state, tokens),
+        SettingsTab::Sandbox => sandbox(ui, state, tokens, service, runtime, tx),
         SettingsTab::Data => data(ui, state, tokens, service, runtime, tx),
     }
 }
@@ -675,6 +675,18 @@ fn notifications(
             "In-app notifications enabled",
         );
         ui.checkbox(
+            &mut state.bootstrap.settings.native_notifications_enabled,
+            "Deliver new alerts through the operating system",
+        );
+        ui.label(
+            RichText::new(format!(
+                "Native notification adapter: {}",
+                state.native_notification_status
+            ))
+            .size(10.0)
+            .color(tokens.text_faint),
+        );
+        ui.checkbox(
             &mut state.bootstrap.settings.demo_enabled,
             "Demo profile available on first launch",
         );
@@ -689,6 +701,10 @@ fn notifications(
             )
             .size(10.0)
             .color(tokens.text_muted),
+        );
+        ui.checkbox(
+            &mut state.bootstrap.settings.individual_analytics_enabled,
+            "Show contributor activity counters (not a performance score)",
         );
         let mut per_repo = state
             .bootstrap
@@ -735,7 +751,7 @@ fn notifications(
         });
         ui.label(
             RichText::new(
-                "Alerts are deduplicated by stable event key. Periodic sync uses this interval for connected live accounts. Native OS notifications and quiet-hour scheduling are deferred.",
+                "Alerts are deduplicated by stable event key. Periodic sync uses this interval for connected live accounts. Native delivery is best-effort and requires a packaged app with OS permission; quiet hours suppress both in-app alert creation and delivery.",
             )
             .size(10.5)
             .color(tokens.text_muted),
@@ -743,25 +759,33 @@ fn notifications(
         if ui.button("Save notification settings").clicked() {
             save_settings(state, service, runtime, tx);
         }
-    });
-    components::panel(tokens).show(ui, |ui| {
-        ui.label(
-            RichText::new("Quiet hours")
-                .size(13.0)
-                .strong()
-                .color(tokens.text),
-        );
-        ui.label(
-            RichText::new(
-                "Quiet-hour suppression and native OS delivery are documented but not implemented in this build.",
-            )
-            .size(10.5)
-            .color(tokens.warning),
-        );
+        if ui.button("Send test notification").clicked() {
+            let service = Arc::clone(service);
+            let tx = tx.clone();
+            runtime.spawn(async move {
+                match service.test_native_notification().await {
+                    Ok(()) => {
+                        let _ = tx.send(UiEvent::Toast(
+                            "Native test notification submitted.".into(),
+                        ));
+                    }
+                    Err(error) => {
+                        let _ = tx.send(UiEvent::Error(error.user_message()));
+                    }
+                }
+            });
+        }
     });
 }
 
-fn sandbox(ui: &mut egui::Ui, state: &mut UiState, tokens: &Tokens) {
+fn sandbox(
+    ui: &mut egui::Ui,
+    state: &mut UiState,
+    tokens: &Tokens,
+    service: &Arc<AppService>,
+    runtime: &tokio::runtime::Handle,
+    tx: &UnboundedSender<UiEvent>,
+) {
     components::panel(tokens).show(ui, |ui| {
         ui.label(
             RichText::new("Local execution policy")
@@ -790,13 +814,54 @@ fn sandbox(ui: &mut egui::Ui, state: &mut UiState, tokens: &Tokens) {
             },
         );
         components::kv(ui, tokens, "Network for commands", "denied by default");
+        ui.horizontal(|ui| {
+            ui.label("Backend");
+            egui::ComboBox::from_id_salt("sandbox_backend")
+                .selected_text(&state.bootstrap.settings.sandbox_backend)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut state.bootstrap.settings.sandbox_backend,
+                        "host".into(),
+                        "Host process guard",
+                    );
+                    ui.selectable_value(
+                        &mut state.bootstrap.settings.sandbox_backend,
+                        "docker".into(),
+                        "Docker container",
+                    );
+                    ui.selectable_value(
+                        &mut state.bootstrap.settings.sandbox_backend,
+                        "podman".into(),
+                        "Podman container",
+                    );
+                });
+        });
+        ui.horizontal(|ui| {
+            ui.label("Container image");
+            ui.add(
+                egui::TextEdit::singleline(&mut state.bootstrap.settings.sandbox_image)
+                    .hint_text("rust:1.88-bookworm")
+                    .desired_width(260.0),
+            );
+        });
+        ui.checkbox(
+            &mut state.bootstrap.settings.sandbox_allow_network,
+            "Allow network for explicitly network-enabled commands",
+        );
+        ui.checkbox(
+            &mut state.bootstrap.settings.sandbox_allow_file_writes,
+            "Allow workspace writes for explicitly modifying commands",
+        );
         ui.label(
             RichText::new(
-                "Only structured command specs with allow-listed executables can run. The host process guard is not a VM boundary; disposable VMs/containers are deferred.",
+                "Host mode uses a process guard; it is not a VM boundary. Container mode runs non-root with a read-only root filesystem, dropped capabilities, no host home mount, no Docker socket, PID/CPU/memory limits and network=none unless separately allowed. The source workspace is mounted read-only unless file writes are explicitly enabled. Docker must already be running and accessible.",
             )
             .size(10.5)
             .color(tokens.text_muted),
         );
+        if ui.button("Save sandbox policy").clicked() {
+            save_settings(state, service, runtime, tx);
+        }
     });
 }
 

@@ -183,6 +183,122 @@ pub fn show(
             .color(tokens.text_muted),
         );
     });
+    components::section_header(
+        ui,
+        tokens,
+        "GitHub Projects v2",
+        Some("Repository-owner projects fetched through the GitHub GraphQL API"),
+    );
+    if state.bootstrap.github_projects.is_empty() {
+        ui.label(
+            RichText::new(
+                "No Projects v2 data is cached. Synchronize a live repository whose owner exposes Projects v2, or verify token access. Unavailable project data is not treated as zero progress.",
+            )
+            .size(10.5)
+            .color(tokens.text_faint),
+        );
+    }
+    for project in state.bootstrap.github_projects.iter().take(20) {
+        let total = project.items.len();
+        let closed = project
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.state.to_ascii_lowercase().as_str(),
+                    "closed" | "done" | "merged"
+                )
+            })
+            .count();
+        let ratio = if total == 0 {
+            None
+        } else {
+            Some(closed as f32 / total as f32)
+        };
+        components::panel(tokens).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(&project.title)
+                        .size(12.5)
+                        .strong()
+                        .color(tokens.text),
+                );
+                components::badge(
+                    ui,
+                    tokens,
+                    &format!("#{}", project.number),
+                    tokens.text_faint,
+                );
+                components::badge(
+                    ui,
+                    tokens,
+                    &format!("{} items", project.items.len()),
+                    tokens.info,
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.small_button("Open").clicked() {
+                        let _ = webbrowser::open(&project.url);
+                    }
+                });
+            });
+            ui.label(
+                RichText::new(format!(
+                    "{} · GitHub-provided status · synced {}",
+                    project.owner_login,
+                    components::short_time(project.synced_at)
+                ))
+                .size(10.0)
+                .color(tokens.text_faint),
+            );
+            match ratio {
+                Some(ratio) => {
+                    ui.add(
+                        egui::ProgressBar::new(ratio)
+                            .desired_width(ui.available_width())
+                            .text(format!(
+                                "{closed}/{total} items in a closed/done state (GitHub status)"
+                            ))
+                            .fill(tokens.accent),
+                    );
+                }
+                None => {
+                    ui.label(
+                        RichText::new("No project items returned; completion is unavailable.")
+                            .size(10.0)
+                            .color(tokens.text_faint),
+                    );
+                }
+            }
+            for item in project.items.iter().take(8) {
+                ui.horizontal(|ui| {
+                    components::badge(ui, tokens, &item.state, tokens.text_muted);
+                    if let Some(url) = &item.url {
+                        if ui
+                            .link(RichText::new(&item.title).size(10.5))
+                            .on_hover_text("Open on GitHub")
+                            .clicked()
+                        {
+                            let _ = webbrowser::open(url);
+                        }
+                    } else {
+                        ui.label(
+                            RichText::new(&item.title)
+                                .size(10.5)
+                                .color(tokens.text_muted),
+                        );
+                    }
+                    if let Some(repo) = &item.repository_name {
+                        ui.label(
+                            RichText::new(format!("· {repo}"))
+                                .size(9.5)
+                                .color(tokens.text_faint),
+                        );
+                    }
+                });
+            }
+        });
+        ui.add_space(5.0);
+    }
     let _ = (runtime, tx);
 }
 
@@ -201,7 +317,36 @@ pub fn activity(
         "Cross-repository timeline, release history and exportable project evidence",
         |ui| {
             if ui.button("Export brief").clicked() {
-                state.palette_hint = "export_brief".into();
+                let service = Arc::clone(service);
+                let tx = tx.clone();
+                let data_dir = state.bootstrap.data_dir.clone();
+                runtime.spawn(async move {
+                    match service.export_project_brief(&data_dir).await {
+                        Ok(path) => {
+                            let _ = tx.send(UiEvent::Toast(format!(
+                                "Project brief exported to {}",
+                                path.display()
+                            )));
+                        }
+                        Err(error) => {
+                            let _ = tx.send(UiEvent::Error(error.user_message()));
+                        }
+                    }
+                });
+            }
+            if ui.button("Generate project brief").clicked() {
+                let service = Arc::clone(service);
+                let tx = tx.clone();
+                runtime.spawn(async move {
+                    match service.project_brief().await {
+                        Ok(brief) => {
+                            let _ = tx.send(UiEvent::Brief(brief));
+                        }
+                        Err(error) => {
+                            let _ = tx.send(UiEvent::Error(error.user_message()));
+                        }
+                    }
+                });
             }
             if ui.button("Generate release report").clicked()
                 && let Some(repo) = state
@@ -239,6 +384,66 @@ pub fn activity(
             }
         },
     );
+    if let Some(brief) = &state.brief {
+        components::panel(tokens).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                components::badge(ui, tokens, &brief.range, tokens.info);
+                components::badge(
+                    ui,
+                    tokens,
+                    &format!(
+                        "freshness: {}",
+                        brief
+                            .freshness
+                            .map(components::short_time)
+                            .unwrap_or_else(|| "unavailable".into())
+                    ),
+                    tokens.text_muted,
+                );
+            });
+            for (label, statements) in [
+                ("Observed facts", &brief.facts),
+                ("Derived metrics", &brief.metrics),
+                ("AI inference", &brief.inferences),
+                ("Recommendations", &brief.next_steps),
+            ] {
+                if statements.is_empty() {
+                    continue;
+                }
+                ui.label(
+                    RichText::new(label)
+                        .size(9.5)
+                        .strong()
+                        .color(tokens.text_faint),
+                );
+                for item in statements.iter().take(8) {
+                    ui.horizontal_wrapped(|ui| {
+                        components::evidence_chip(ui, tokens, item.kind, None);
+                        ui.label(
+                            RichText::new(&item.text)
+                                .size(10.5)
+                                .color(tokens.text_muted),
+                        );
+                        for evidence in item.evidence.iter().take(2) {
+                            if let Some(url) = &evidence.url
+                                && ui.small_button(&evidence.label).clicked()
+                            {
+                                let _ = webbrowser::open(url);
+                            }
+                        }
+                    });
+                }
+            }
+            if !brief.missing.is_empty() {
+                ui.label(
+                    RichText::new(format!("Missing data: {}", brief.missing.join(" · ")))
+                        .size(10.0)
+                        .color(tokens.warning),
+                );
+            }
+        });
+        ui.add_space(8.0);
+    }
     if let Some(repo_id) = state.release_repository.clone() {
         let mut tag = state.release_tag.clone();
         let mut name = state.release_name.clone();
@@ -711,9 +916,13 @@ pub fn onboarding(
                     &mut state.bootstrap.settings.notifications_enabled,
                     "Enable in-app notifications",
                 );
+                ui.checkbox(
+                    &mut state.bootstrap.settings.native_notifications_enabled,
+                    "Enable native OS delivery when the packaged app is permitted",
+                );
                 ui.label(
                     RichText::new(
-                        "Notifications are deduplicated by event key. Native OS notifications are deferred; in-app alerts are available now.",
+                        "Notifications are deduplicated by event key. Native OS delivery is best-effort and requires a packaged, permission-granted app; in-app alerts remain the reliable fallback.",
                     )
                     .size(10.5)
                     .color(tokens.text_muted),
@@ -730,6 +939,7 @@ pub fn onboarding(
                 );
                 if ui.button("Finish setup").clicked() {
                     state.onboarding_complete = true;
+                    state.bootstrap.settings.onboarding_complete = true;
                     state.screen = crate::nav::Screen::Overview;
                     let settings = state.bootstrap.settings.clone();
                     let service = Arc::clone(service);

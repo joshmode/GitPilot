@@ -255,6 +255,67 @@ impl GitHubClient {
             })
     }
 
+    /// Execute a GitHub GraphQL query. GraphQL is only used for schema surfaces
+    /// such as Projects v2 where there is no equivalent REST endpoint.
+    pub async fn graphql<T: serde::de::DeserializeOwned, V: serde::Serialize>(
+        &self,
+        query: &str,
+        variables: V,
+    ) -> Result<T> {
+        let response = self
+            .http
+            .post(self.graphql_endpoint())
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(USER_AGENT, format!("GitPilot/{}", crate::APP_VERSION))
+            .json(&serde_json::json!({ "query": query, "variables": variables }))
+            .send()
+            .await
+            .map_err(network_error)?;
+        let response = self.check_response(response).await?;
+        let envelope: GraphqlEnvelope<T> =
+            response
+                .json()
+                .await
+                .map_err(|error| GitPilotError::GitHub {
+                    status: 200,
+                    message: format!("invalid GraphQL response: {error}"),
+                })?;
+        if let Some(errors) = envelope.errors
+            && !errors.is_empty()
+        {
+            let message = errors
+                .into_iter()
+                .filter_map(|error| error.message)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GitPilotError::GitHub {
+                status: 200,
+                message: redact_secrets(&format!("GraphQL error: {message}"))
+                    .chars()
+                    .take(600)
+                    .collect(),
+            });
+        }
+        envelope.data.ok_or_else(|| GitPilotError::GitHub {
+            status: 200,
+            message: "GraphQL response contained no data".into(),
+        })
+    }
+
+    fn graphql_endpoint(&self) -> String {
+        if self.base_url == "https://api.github.com" {
+            "https://api.github.com/graphql".into()
+        } else {
+            // Enterprise API base is https://host/api/v3 and its GraphQL
+            // endpoint is https://host/api/graphql.
+            self.base_url
+                .trim_end_matches("/api/v3")
+                .trim_end_matches('/')
+                .to_owned()
+                + "/api/graphql"
+        }
+    }
+
     pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>> {
         let response = self
             .request::<serde_json::Value>(Method::GET, path, None)
@@ -460,6 +521,18 @@ impl GitHubClient {
             message: redact_secrets(&message),
         })
     }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GraphqlEnvelope<T> {
+    data: Option<T>,
+    #[serde(default)]
+    errors: Option<Vec<GraphqlError>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GraphqlError {
+    message: Option<String>,
 }
 
 fn parse_next_link(header: Option<&str>) -> Option<String> {
@@ -950,6 +1023,245 @@ pub struct WireCreatedRelease {
 #[derive(Debug, Clone, Deserialize)]
 pub struct WireRepositoryPermission {
     pub permission: Option<String>,
+}
+
+const PROJECTS_QUERY: &str = r#"
+query GitPilotProjects($owner: String!, $cursor: String) {
+  repositoryOwner(login: $owner) {
+    ... on Organization {
+      login
+      projectsV2(first: 25, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+        ...ProjectConnection
+      }
+    }
+    ... on User {
+      login
+      projectsV2(first: 25, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+        ...ProjectConnection
+      }
+    }
+  }
+}
+
+fragment ProjectConnection on ProjectV2Connection {
+  pageInfo { hasNextPage endCursor }
+  nodes {
+    id
+    number
+    title
+    shortDescription
+    url
+    closed
+    items(first: 100) {
+      nodes {
+        id
+        updatedAt
+        fieldValues(first: 20) {
+          nodes {
+            ... on ProjectV2ItemFieldSingleSelectValue {
+              name
+              field { ... on ProjectV2SingleSelectField { name } }
+            }
+            ... on ProjectV2ItemFieldTextValue {
+              text
+              field { ... on ProjectV2FieldCommon { name } }
+            }
+          }
+        }
+        content {
+          __typename
+          ... on Issue {
+            id
+            title
+            state
+            url
+            repository { nameWithOwner }
+          }
+          ... on PullRequest {
+            id
+            title
+            state
+            merged
+            url
+            repository { nameWithOwner }
+          }
+          ... on DraftIssue {
+            title
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
+#[derive(Debug, Deserialize)]
+struct ProjectsQueryData {
+    #[serde(rename = "repositoryOwner")]
+    owner: Option<ProjectsOwner>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectsOwner {
+    #[serde(rename = "projectsV2")]
+    projects_v2: Option<ProjectsConnection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectsConnection {
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
+    nodes: Option<Vec<WireProject>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PageInfo {
+    #[serde(rename = "hasNextPage")]
+    has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireProject {
+    id: String,
+    number: i64,
+    title: String,
+    #[serde(rename = "shortDescription")]
+    short_description: Option<String>,
+    url: String,
+    closed: bool,
+    items: ProjectItems,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectItems {
+    nodes: Option<Vec<WireProjectItem>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireProjectItem {
+    id: String,
+    #[serde(rename = "updatedAt")]
+    updated_at: Option<String>,
+    #[serde(rename = "fieldValues")]
+    field_values: Option<ProjectFieldValues>,
+    content: Option<WireProjectContent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectFieldValues {
+    nodes: Option<Vec<ProjectFieldValue>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectFieldValue {
+    name: Option<String>,
+    text: Option<String>,
+    field: Option<ProjectField>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectField {
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireProjectContent {
+    #[serde(rename = "__typename")]
+    typename: String,
+    id: Option<String>,
+    title: Option<String>,
+    state: Option<String>,
+    merged: Option<bool>,
+    url: Option<String>,
+    repository: Option<WireProjectRepo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireProjectRepo {
+    #[serde(rename = "nameWithOwner")]
+    name_with_owner: String,
+}
+
+fn normalize_project(account_id: &str, owner: &str, wire: WireProject) -> GitHubProject {
+    let items = wire
+        .items
+        .nodes
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| {
+            let content = item.content?;
+            let (title, url, repository) = match content.typename.as_str() {
+                "Issue" | "PullRequest" => (
+                    content.title?,
+                    content.url,
+                    content
+                        .repository
+                        .map(|repository| repository.name_with_owner),
+                ),
+                "DraftIssue" => (
+                    content.title.unwrap_or_else(|| "Draft issue".into()),
+                    None,
+                    None,
+                ),
+                _ => return None,
+            };
+            let mut state = content.state.unwrap_or_else(|| "unknown".into());
+            if content.merged == Some(true) {
+                state = "merged".into();
+            }
+            if let Some(status) = item
+                .field_values
+                .and_then(|values| values.nodes)
+                .unwrap_or_default()
+                .into_iter()
+                .find_map(|value| {
+                    let field_name = value.field.and_then(|field| field.name);
+                    let selected = value.name.or(value.text);
+                    (field_name.as_deref() == Some("Status"))
+                        .then_some(selected)
+                        .flatten()
+                })
+            {
+                state = status;
+            }
+            Some(GitHubProjectItem {
+                id: item.id,
+                content_type: content.typename,
+                content_id: content.id,
+                title,
+                state,
+                url,
+                repository_name: repository,
+                updated_at: item.updated_at.map(iso),
+            })
+        })
+        .collect();
+    GitHubProject {
+        id: wire.id,
+        account_id: account_id.into(),
+        owner_login: owner.into(),
+        number: wire.number,
+        title: wire.title,
+        description: wire.short_description.unwrap_or_default(),
+        url: wire.url,
+        closed: wire.closed,
+        synced_at: Utc::now(),
+        items,
+    }
+}
+
+#[cfg(test)]
+fn normalize_projects_fixture(value: serde_json::Value) -> Vec<GitHubProject> {
+    let data: ProjectsQueryData = serde_json::from_value(value).expect("project fixture");
+    let projects = data.owner.and_then(|owner| owner.projects_v2);
+    projects
+        .and_then(|projects| projects.nodes)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|project| normalize_project("acct", "octo", project))
+        .collect()
 }
 
 impl GitHubService {
@@ -1561,6 +1873,9 @@ impl GitHubService {
             ("CONTRIBUTING.md", "contributing"),
             ("docs/architecture.md", "architecture"),
             ("ARCHITECTURE.md", "architecture"),
+            ("CODEOWNERS", "codeowners"),
+            (".github/CODEOWNERS", "codeowners"),
+            ("docs/CODEOWNERS", "codeowners"),
         ] {
             let content = client
                 .get_optional_json::<WireContent>(&format!(
@@ -1576,8 +1891,12 @@ impl GitHubService {
                     .save_knowledge(&KnowledgeRecord {
                         id: format!("gh-doc-{}-{}", repo.id, path.replace('/', "-")),
                         repository_id: Some(repo.id.clone()),
-                        kind: "documentation".into(),
-                        title: path.into(),
+                        kind: if kind == "codeowners" {
+                            "codeowners".into()
+                        } else {
+                            "documentation".into()
+                        },
+                        title: "CODEOWNERS".into(),
                         content: content.chars().take(120_000).collect(),
                         source_object: path.into(),
                         source_version: Some(
@@ -1795,11 +2114,66 @@ impl GitHubService {
                 .await?;
             summary.commits += 1;
         }
+        if let Err(error) = self.sync_projects_v2(repo, cancel).await {
+            tracing::warn!(repo = %repo.full_name, %error, "Projects v2 sync unavailable");
+        }
         self.store
             .mark_repository_synced(&repo.id, Utc::now())
             .await?;
         info!(repo = %repo.full_name, prs = summary.prs, issues = summary.issues, "repository synced");
         Ok(summary)
+    }
+
+    /// Synchronize organization/user Projects v2 metadata and project items
+    /// through GitHub's GraphQL API. This is a bounded read-only operation.
+    pub async fn sync_projects_v2(
+        &self,
+        repo: &Repository,
+        cancel: &CancellationToken,
+    ) -> Result<usize> {
+        let account = self
+            .store
+            .accounts()
+            .await?
+            .into_iter()
+            .find(|a| a.id == repo.account_id)
+            .ok_or_else(|| {
+                GitPilotError::AuthRequired("repository account is not connected".into())
+            })?;
+        let client = self.client_for(&account.id, &account.host)?;
+        let mut total = 0;
+        let mut cursor: Option<String> = None;
+        loop {
+            if cancel.is_cancelled() {
+                return Err(GitPilotError::Cancelled);
+            }
+            let data: ProjectsQueryData = client
+                .graphql(
+                    PROJECTS_QUERY,
+                    serde_json::json!({
+                        "owner": repo.owner,
+                        "cursor": cursor,
+                    }),
+                )
+                .await?;
+            let Some(projects) = data.owner.and_then(|owner| owner.projects_v2) else {
+                break;
+            };
+            for node in projects.nodes.unwrap_or_default() {
+                let project = normalize_project(&account.id, &repo.owner, node);
+                total += project.items.len();
+                self.store.save_github_project(&project).await?;
+            }
+            let page_info = projects.page_info;
+            if !page_info.has_next_page {
+                break;
+            }
+            cursor = page_info.end_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(total)
     }
 
     pub async fn fetch_commit_diff(&self, repository_id: &str, sha: &str) -> Result<Vec<DiffFile>> {
@@ -2196,6 +2570,52 @@ mod tests {
             Some("https://api.github.com/repos/a/b/issues?page=2")
         );
         assert_eq!(parse_next_link(None), None);
+    }
+
+    #[test]
+    fn projects_v2_fixture_is_typed_and_status_is_preserved() {
+        let fixture = serde_json::json!({
+            "repositoryOwner": {
+                "projectsV2": {
+                        "pageInfo": { "hasNextPage": false, "endCursor": null },
+                        "nodes": [{
+                            "id": "PVT_1",
+                            "number": 4,
+                            "title": "Release 1.0",
+                            "shortDescription": "Ship the release",
+                            "url": "https://github.com/orgs/octo/projects/4",
+                            "closed": false,
+                            "items": {
+                                "nodes": [{
+                                    "id": "PVTI_1",
+                                    "updatedAt": "2026-10-29T00:00:00Z",
+                                    "fieldValues": { "nodes": [{
+                                        "name": "Done",
+                                        "field": { "name": "Status" }
+                                    }]},
+                                    "content": {
+                                        "__typename": "PullRequest",
+                                        "id": "PR_1",
+                                        "title": "Ship it",
+                                        "state": "OPEN",
+                                        "merged": false,
+                                        "url": "https://github.com/octo/repo/pull/1",
+                                        "repository": { "nameWithOwner": "octo/repo" }
+                                    }
+                                }]
+                            }
+                        }]
+                }
+            }
+        });
+        let projects = normalize_projects_fixture(fixture);
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].items.len(), 1);
+        assert_eq!(projects[0].items[0].state, "Done");
+        assert_eq!(
+            projects[0].items[0].repository_name.as_deref(),
+            Some("octo/repo")
+        );
     }
 
     #[test]

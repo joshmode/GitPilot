@@ -9,8 +9,9 @@ cargo check --workspace --offline
   -> Finished successfully
 
 cargo test --workspace --offline
-  -> 31 core unit tests passed
-  -> 26 service/database integration tests passed
+  -> 37 core unit tests passed
+  -> 30 service/database integration tests passed
+  -> webhook binary and app unit targets compiled and ran
   -> 0 app unit tests (GUI smoke tested separately)
 
 /opt/homebrew/Cellar/rust/1.99.1/bin/cargo-clippy --offline --workspace --all-targets -- -D warnings
@@ -26,13 +27,13 @@ constraint, not a suppressed lint.
 
 ## Native launch smoke test
 
-`GITPILOT_DATA_DIR=/tmp/gitpilot-final-recheck target/release/gitpilot` remained alive
+`GITPILOT_DATA_DIR=/tmp/gitpilot-release-smoke target/release/gitpilot` remained alive
 after startup. It created a WAL-mode SQLite database and logs. SQLite reported:
 
 ```text
 3 repositories
 6 pull requests
-0 findings before the first review
+1 CODEOWNERS knowledge fixture
 PRAGMA integrity_check -> ok
 ```
 
@@ -55,17 +56,18 @@ The review pass also added regression coverage for:
 - automatic private-review execution once per PR head
 - persisted job dispatcher startup and runtime initialization
 
-Latest workspace test totals: **31 unit tests + 26 integration tests**, all
+Latest workspace test totals: **37 unit tests + 30 integration tests**, all
 passing. Strict Clippy and `cargo fmt --check` also pass.
 
-Final release-binary smoke test also initialized schema migration version 2,
+Final release-binary smoke test also initialized schema migration version 3,
 3 demo repositories, 6 pull requests, 0 jobs and reported
 `PRAGMA integrity_check = ok`.
 
 Post-audit additions include a live job dispatcher, migration v1→v2 coverage,
 security-alert ingestion, release reports, commit diff retrieval, guarded
-GitHub write/review boundaries and source-link navigation fixes. The latest
-workspace run remains **31 unit + 26 integration tests**, all passing, with fmt
+GitHub write/review boundaries, Projects v2, webhook verification, native
+notification fallback and source-link navigation fixes. The latest workspace
+run is **37 unit + 30 integration tests**, all passing, with fmt
 and strict Clippy clean.
 
 ## Not executed
@@ -82,7 +84,14 @@ and strict Clippy clean.
 - LaunchServices app opening was unavailable in this managed macOS session, so
   the bundle was validated structurally and its executable was launched
   directly. This is not equivalent to a signed, notarized user install test.
-- Container/VM sandbox escape testing: that backend is not bundled.
+- Live Docker/Podman execution: the managed session could not access the
+  Docker daemon. The backend's structured policy is unit-tested, but runtime
+  container isolation is not claimed as verified here.
+- Native macOS notification delivery from a packaged app: the adapter compiled
+  and its bare-binary fallback is tested, but OS authorization/banner delivery
+  requires a signed desktop session.
+- Live Projects v2 and webhook requests: normalized GraphQL fixtures and
+  signature/dedupe tests pass; no live token or deployed receiver was used.
 
 ## Regression notes
 

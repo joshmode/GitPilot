@@ -41,17 +41,20 @@ Security endpoints can return `403` or `404` when the token does not have the
 relevant permission. GitPilot surfaces that as **Unavailable**, not “no
 alerts.”
 
-The token is stored under service `com.gitpilot.desktop` in the macOS Keychain.
-It is not written to SQLite, logs, exported reports or prompts.
+The token is stored under service `com.gitpilot.desktop` in the macOS Keychain
+or Windows Credential Manager. It is not written to SQLite, logs, exported
+reports or prompts. Linux builds currently refuse credential persistence until
+a reviewed Secret Service backend is added rather than silently writing
+plaintext.
 
 ### GitHub App / OAuth
 
-This build deliberately supports fine-grained PATs as its first integration.
-For an organizational deployment, prefer a small backend that holds the GitHub
-App private key, completes the installation callback and mints short-lived
-installation tokens. A desktop client must not embed an App private key. OAuth
-PKCE for public clients is the next auth adapter; it is not claimed as
-implemented here.
+Fine-grained PATs and the public-client OAuth device flow are supported. For an
+organizational deployment, prefer a small backend that holds the GitHub App
+private key, completes the installation callback and mints short-lived
+installation tokens. A desktop client must not embed an App private key.
+GitHub App installation tokens are not implemented in this desktop build;
+Projects v2 requires the token to have Projects read permission.
 
 ## AI providers
 
@@ -67,7 +70,16 @@ permissions** only after deciding which repository evidence may leave the host.
 
 Open **Local workspace**, paste an absolute Git working-tree path and connect.
 Inspection is read-only. Documentation indexing is explicit. Command execution
-is disabled by default and requires the local-execution permission.
+is disabled by default and requires the local-execution permission. Choose
+`host`, `docker` or `podman` under **Settings → Sandbox**. Container mode
+requires a configured image and a running runtime; source is mounted read-only
+unless file writes are separately allowed.
+
+## Optional webhook receiver
+
+See [AUTOMATIONS.md](AUTOMATIONS.md) for the separate HMAC-verified
+`gitpilot-webhook` receiver. It must be deployed behind TLS and never replaces
+the desktop app's polling fallback.
 
 ## Data locations
 

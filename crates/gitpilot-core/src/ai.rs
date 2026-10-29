@@ -336,6 +336,31 @@ impl ProviderAdapter for HttpProvider {
                     .filter_map(|model| model["id"].as_str().map(str::to_string))
                     .collect())
             }
+            ProviderKind::Gemini => {
+                let value: Value = self
+                    .http
+                    .get(format!(
+                        "{}/v1beta/models?key={}",
+                        self.endpoint,
+                        self.secret()?
+                    ))
+                    .send()
+                    .await
+                    .map_err(provider_network_error)?
+                    .json()
+                    .await
+                    .map_err(provider_network_error)?;
+                Ok(value["models"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|model| {
+                        model["name"]
+                            .as_str()
+                            .map(|name| name.trim_start_matches("models/").to_owned())
+                    })
+                    .collect())
+            }
             _ => Err(GitPilotError::Unsupported(
                 "model discovery is not supported by this provider".into(),
             )),

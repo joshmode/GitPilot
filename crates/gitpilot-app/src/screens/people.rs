@@ -100,12 +100,14 @@ pub fn show(
                             &format!("{} assigned issues", person.assigned_issues),
                             tokens.info,
                         );
-                        components::badge(
-                            ui,
-                            tokens,
-                            &format!("{} recent commits", person.commits_30d),
-                            tokens.text_muted,
-                        );
+                        if state.bootstrap.settings.individual_analytics_enabled {
+                            components::badge(
+                                ui,
+                                tokens,
+                                &format!("{} recent commits (context only)", person.commits_30d),
+                                tokens.text_muted,
+                            );
+                        }
                     });
                     if person.pending_reviews >= 2 {
                         ui.label(

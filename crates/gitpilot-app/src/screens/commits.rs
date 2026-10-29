@@ -267,11 +267,69 @@ pub fn show(
             Some("Metadata-derived · AI inference is labelled"),
         );
         components::panel(tokens).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                components::evidence_chip(ui, tokens, gitpilot_core::EvidenceKind::Inference, None);
+                ui.label(
+                    RichText::new(format!("{} · {}", explanation.provider, explanation.model))
+                        .size(10.0)
+                        .color(tokens.text_faint),
+                );
+            });
             ui.label(
                 RichText::new(&explanation.executive)
                     .size(11.5)
                     .color(tokens.text_muted),
             );
+            if !explanation.review_focus.is_empty() {
+                ui.label(
+                    RichText::new("REVIEW FOCUS")
+                        .size(9.0)
+                        .strong()
+                        .color(tokens.text_faint),
+                );
+                for path in &explanation.review_focus {
+                    ui.label(
+                        RichText::new(format!("· {path}"))
+                            .monospace()
+                            .size(10.0)
+                            .color(tokens.warning),
+                    );
+                }
+            }
+            if !explanation.file_notes.is_empty() {
+                ui.label(
+                    RichText::new("CHANGE-BY-CHANGE")
+                        .size(9.0)
+                        .strong()
+                        .color(tokens.text_faint),
+                );
+                for note in explanation.file_notes.iter().take(20) {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {} · +{} −{}",
+                            note.path, note.summary, note.additions, note.deletions
+                        ))
+                        .size(10.0)
+                        .color(tokens.text_muted),
+                    );
+                }
+            }
+            for uncertainty in &explanation.uncertainties {
+                ui.label(
+                    RichText::new(format!("Uncertainty: {uncertainty}"))
+                        .size(10.0)
+                        .color(tokens.warning),
+                );
+            }
+            for citation in &explanation.citations {
+                if let Some(url) = &citation.url
+                    && ui
+                        .link(RichText::new(format!("Evidence: {}", citation.label)).size(10.0))
+                        .clicked()
+                {
+                    let _ = webbrowser::open(url);
+                }
+            }
         });
     }
     if let Some(commit) = &state.selected_commit_detail {

@@ -26,9 +26,10 @@ Store notarization credentials in the keychain, not in this repository.
 
 The UI and core are cross-platform Rust. Remaining platform work:
 
-- Replace the macOS-only credential adapter with Windows Credential Manager
-  and Secret Service/libsecret adapters. Non-macOS builds currently refuse to
-  persist a credential rather than falling back to plaintext.
+- Windows builds use the Windows Credential Manager adapter (compile-gated; not
+  runtime-tested on this macOS host). Linux builds refuse to persist a
+  credential until a reviewed Secret Service backend is added rather than
+  falling back to plaintext.
 - Validate filesystem path handling and packaging on each target.
 - Add native application manifests and code signing.
 - Validate process/container isolation behavior, which is host-specific.
@@ -36,6 +37,16 @@ The UI and core are cross-platform Rust. Remaining platform work:
 Recommended Windows packaging: `cargo build --release`, then a WiX or MSIX
 installer. Recommended Linux packaging: a `.deb`/AppImage with an explicit
 credential-store dependency. Neither is produced by this source tree yet.
+
+The optional webhook receiver is a second binary:
+
+```bash
+cargo build --release -p gitpilot-app --bin gitpilot-webhook
+```
+
+Deploy it separately behind TLS and a network policy. It stores verified events
+in the configured GitPilot data directory and does not open a public listener
+from the desktop binary.
 
 ## Upgrade and migration behavior
 

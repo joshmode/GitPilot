@@ -498,6 +498,26 @@ pub async fn seed(store: &Store) -> Result<()> {
             })
             .await?;
     }
+    store
+        .save_knowledge(&KnowledgeRecord {
+            id: "knowledge-codeowners".into(),
+            repository_id: Some("repo-0001".into()),
+            kind: "codeowners".into(),
+            title: "CODEOWNERS".into(),
+            content: "/src/auth/** @maya\n/src/policy/** @devin\n*.md @sora\n".into(),
+            source_object: ".github/CODEOWNERS".into(),
+            source_version: Some("demo@2026-10".into()),
+            source_url: Some(
+                "https://github.com/acme/control-plane/blob/main/.github/CODEOWNERS".into(),
+            ),
+            confidence: 1.0,
+            extraction_method: "Demo CODEOWNERS fixture".into(),
+            explicit_fact: true,
+            superseded_by: None,
+            extracted_at: now - Duration::hours(2),
+            observed_at: now - Duration::hours(3),
+        })
+        .await?;
 
     let notifications = [
         (

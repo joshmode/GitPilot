@@ -29,7 +29,8 @@ and recovery of interrupted work after restart. Long operations receive a
 1. GitHub REST responses become wire models, then normalized domain records.
 2. Repository, PR, issue, check, review, commit, milestone and security-alert
    records are upserted by stable external IDs.
-3. FTS5 triggers index searchable titles and descriptions.
+3. FTS5 indexing is kept synchronized by the store's explicit insert/delete
+   transactions, using a relational `search_documents` source mirror.
 4. Intelligence derives metrics from stored records with an explicit observation
    time. Missing data remains `Unavailable`, never zero.
 5. AI requests receive a scoped evidence packet. The response is parsed and
@@ -44,18 +45,20 @@ and recovery of interrupted work after restart. Long operations receive a
 
 ## Key decisions
 
-- **REST first.** GitHub REST covers discovery, PRs, commits, checks, issues,
-  releases and security alerts with predictable pagination. GraphQL is a future
-  optimization and Projects v2 path, not required for correctness.
+- **REST first, GraphQL for Projects v2.** REST covers discovery, PRs, commits,
+  checks, issues, releases and security alerts with predictable pagination.
+  GraphQL is limited to the Projects v2 schema surface and kept behind a typed
+  client boundary.
 - **FTS5 before vectors.** Full-text retrieval is local, deterministic, cheap and
   works without embeddings. The schema reserves retrieval provenance and allows
   a vector table/provider later.
 - **One rich SQLite schema.** JSON is limited to flexible metadata (raw labels,
   findings evidence and automation definitions). Core identity and relationships
   are relational with uniqueness constraints.
-- **Native keychain.** Tokens are addressed by account ID and stored outside the
-  database. Non-macOS builds use an explicit unsupported credential adapter
-  until a reviewed native backend is added rather than silently writing plaintext.
+- **Native credential stores.** Tokens are addressed by account ID and stored
+  outside the database in macOS Keychain or Windows Credential Manager.
+  Unsupported Linux hosts use an explicit refusing adapter rather than silently
+  writing plaintext.
 - **No full repository mirror.** GitPilot caches metadata and bounded diffs. Full
   history and blobs stay in Git. Local repositories are inspected through
   non-interactive Git commands with structured arguments.

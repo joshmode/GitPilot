@@ -25,6 +25,11 @@ only persists a finding whose file and line are present in the cached diff.
 | OpenAI-compatible | `POST /v1/chat/completions` | Bearer API key |
 | Ollama | `POST /api/chat` | local endpoint, no remote key |
 
+Model discovery is limited to providers that expose a compatible catalog:
+OpenAI/OpenAI-compatible `/v1/models`, Gemini's model-list endpoint, and Ollama
+`/api/tags`. Anthropic models must be entered explicitly because its list
+endpoint is not part of the request contract used by this client.
+
 Remote endpoints must use HTTPS. The only permitted HTTP endpoint is local
 Ollama at a loopback address.
 

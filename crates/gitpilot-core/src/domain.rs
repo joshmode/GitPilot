@@ -161,6 +161,17 @@ pub enum MergeableState {
     Blocked,
 }
 
+impl MergeableState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Mergeable => "mergeable",
+            Self::Conflicting => "conflicting",
+            Self::Unknown => "unknown",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckState {
@@ -364,6 +375,20 @@ pub struct Contributor {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewerRecommendation {
+    pub login: String,
+    pub reasons: Vec<EvidenceStatement>,
+    pub confidence: f64,
+    pub workload_requests: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodeownerRule {
+    pub pattern: String,
+    pub owners: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepositoryHealth {
     pub repository_id: Id,
     pub name: String,
@@ -388,6 +413,43 @@ pub struct MilestoneSnapshot {
     pub closed_issues: i64,
     pub due_on: Option<DateTime<Utc>>,
     pub fetched_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubProject {
+    pub id: Id,
+    pub account_id: Id,
+    pub owner_login: String,
+    pub number: i64,
+    pub title: String,
+    pub description: String,
+    pub url: String,
+    pub closed: bool,
+    pub synced_at: DateTime<Utc>,
+    pub items: Vec<GitHubProjectItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubProjectItem {
+    pub id: Id,
+    pub content_type: String,
+    pub content_id: Option<Id>,
+    pub title: String,
+    pub state: String,
+    pub url: Option<String>,
+    pub repository_name: Option<String>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookEventRecord {
+    pub delivery_id: String,
+    pub event: String,
+    pub action: Option<String>,
+    pub repository_full_name: Option<String>,
+    pub received_at: DateTime<Utc>,
+    pub processed_at: Option<DateTime<Utc>>,
+    pub payload: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -511,6 +573,7 @@ pub struct PrDetail {
     pub summary: Option<AiExplanation>,
     pub diff_freshness: Option<DateTime<Utc>>,
     pub latest_review_run: Option<ReviewRun>,
+    pub merge_readiness: Vec<EvidenceStatement>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -900,10 +963,26 @@ pub struct AppSettings {
     pub account_login: Option<String>,
     pub default_provider_id: Option<String>,
     pub notifications_enabled: bool,
+    #[serde(default)]
+    pub native_notifications_enabled: bool,
     pub quiet_hours: Option<String>,
     pub per_repository_notifications: BTreeMap<String, bool>,
     pub log_retention_days: i64,
     pub sync_interval_minutes: i64,
+    #[serde(default = "default_sandbox_backend")]
+    pub sandbox_backend: String,
+    #[serde(default)]
+    pub sandbox_image: String,
+    #[serde(default)]
+    pub sandbox_allow_network: bool,
+    #[serde(default)]
+    pub sandbox_allow_file_writes: bool,
+    #[serde(default)]
+    pub allowed_executables: Vec<String>,
+    #[serde(default)]
+    pub individual_analytics_enabled: bool,
+    #[serde(default)]
+    pub onboarding_complete: bool,
 }
 
 impl Default for AppSettings {
@@ -916,10 +995,22 @@ impl Default for AppSettings {
             account_login: None,
             default_provider_id: None,
             notifications_enabled: true,
+            native_notifications_enabled: false,
             quiet_hours: None,
             per_repository_notifications: BTreeMap::new(),
             log_retention_days: 30,
             sync_interval_minutes: 5,
+            sandbox_backend: default_sandbox_backend(),
+            sandbox_image: String::new(),
+            sandbox_allow_network: false,
+            sandbox_allow_file_writes: false,
+            allowed_executables: Vec::new(),
+            individual_analytics_enabled: false,
+            onboarding_complete: false,
         }
     }
+}
+
+fn default_sandbox_backend() -> String {
+    "host".into()
 }

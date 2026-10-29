@@ -15,19 +15,22 @@ implemented and tested; `PARTIAL` is documented in FEATURES.md.
 - [x] Structured error boundary and tracing
 - [x] Demo mode with labelled fixtures
 - [x] Persisted background jobs with cancellation and retry
+- [x] Native macOS UserNotifications delivery adapter with bundle detection and fail-closed fallback
 
 ## Milestone 2 — GitHub
-- [x] Keychain credential adapter boundary
+- [x] macOS Keychain and Windows Credential Manager adapters; unsupported Linux backend refuses plaintext
 - [x] REST client: auth, pagination, rate limits, conditional requests
 - [x] Repository discovery/selection and multi-account storage
 - [x] PR, issue, commit, review, check and release sync
 - [x] Incremental PR sync and FTS search
+- [x] GitHub Projects v2 GraphQL read sync, typed persistence and explicit unavailable UI
 
 ## Milestone 3 — intelligence
 - [x] Dashboard metrics with explicit missing-data states
 - [x] PR cockpit, filters, detail and diff viewer
 - [x] Commit explorer and compare view
 - [x] Evidence-labelled project brief
+- [x] Project brief export with evidence categories and unavailable-data disclosure
 - [x] Repository health and activity
 
 ## Milestone 4 — providers
@@ -41,7 +44,8 @@ implemented and tested; `PARTIAL` is documented in FEATURES.md.
 - [x] Evidence and diff-location validation
 - [x] Deduplication, lifecycle and persisted runs
 - [x] Review policies and GUI cockpit
-- [x] Guarded human review-submission service path (not exposed in GUI; AI findings remain private)
+- [x] Guarded human summary/line-comment publishing in the PR cockpit; AI findings remain private
+- [x] Reviewer suggestions from CODEOWNERS/workload evidence; never auto-assigned
 
 ## Milestone 6 — collaboration/memory
 - [x] Contributor workload and review bottlenecks
@@ -55,8 +59,9 @@ implemented and tested; `PARTIAL` is documented in FEATURES.md.
 - [x] Persisted queue, idempotency and run history
 - [x] Local Git read workspace and comparison
 - [x] Guarded structured command sandbox
-- [x] Event polling fallback; webhook receiver documented
-- [ ] Container/VM isolation backend (deferred; host process guard documented)
+- [x] Event polling fallback and standalone HMAC-verified, deduplicated webhook receiver
+- [x] Host process guard plus structured Docker/Podman backend with read-only source and resource limits
+- [ ] Native container execution verification (runtime daemon unavailable in the managed test environment)
 
 ## Milestone 8 — hardening
 - [x] Unit/integration tests and fixture-based GitHub tests
@@ -75,4 +80,6 @@ implemented and tested; `PARTIAL` is documented in FEATURES.md.
 - [x] Local command executable/privilege/argument validation
 - [x] Repository scope switching, saved-view recall and command-palette recents
 - [x] On-demand commit diff viewer and generated-file persistence
+- [x] Commit explanations receive bounded diff hunks and disclose unavailable evidence
+- [x] Cross-platform notification, sandbox, project, webhook and credential-path tests
 

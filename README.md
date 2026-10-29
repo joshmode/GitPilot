@@ -27,10 +27,12 @@ cargo run -p gitpilot-app
 Requirements: stable Rust (1.88+), macOS 12+ for the first-class desktop target.
 The default build uses egui's native renderer and requires no Node.js runtime.
 
-To use GitHub data, add a fine-grained PAT in **Settings → GitHub**. The token is
-stored in the macOS Keychain (or an OS credential adapter on other platforms),
-never in SQLite. Required read scopes are listed in the UI. AI providers are
-optional until an explanation or review is requested.
+To use GitHub data, add a fine-grained PAT or start the public OAuth device flow
+in **Settings → GitHub**. The token is stored in the macOS Keychain or Windows
+Credential Manager, never in SQLite. Linux builds refuse plaintext persistence
+until a reviewed Secret Service backend is added. Required read scopes are
+listed in the UI. AI providers are optional until an explanation or review is
+requested.
 
 ## Configuration and data
 

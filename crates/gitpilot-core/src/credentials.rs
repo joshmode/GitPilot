@@ -30,53 +30,55 @@ fn account_key(kind: CredentialKind, id: &str) -> String {
     format!("{}{}", kind.prefix(), id)
 }
 
-#[cfg(target_os = "macos")]
+/// OS credential storage backed by the platform-native Keychain or Windows
+/// Credential Manager. The desktop runtime never selects the keyring crate's
+/// in-memory mock backend.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub struct KeychainStore;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl KeychainStore {
     pub fn new() -> Self {
         Self
     }
+
+    fn entry(kind: CredentialKind, id: &str) -> Result<keyring::Entry> {
+        keyring::Entry::new(SERVICE, &account_key(kind, id))
+            .map_err(|error| GitPilotError::Credential(format!("credential entry error: {error}")))
+    }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl Default for KeychainStore {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl CredentialStore for KeychainStore {
     fn set(&self, kind: CredentialKind, id: &str, secret: &str) -> Result<()> {
-        use security_framework::passwords::set_generic_password;
-        set_generic_password(SERVICE, &account_key(kind, id), secret.as_bytes())
-            .map_err(|e| GitPilotError::Credential(format!("Keychain write failed ({})", e.code())))
+        Self::entry(kind, id)?
+            .set_password(secret)
+            .map_err(|error| GitPilotError::Credential(format!("credential write failed: {error}")))
     }
 
     fn get(&self, kind: CredentialKind, id: &str) -> Result<Option<String>> {
-        use security_framework::passwords::get_generic_password;
-        match get_generic_password(SERVICE, &account_key(kind, id)) {
-            Ok(bytes) => String::from_utf8(bytes)
-                .map(Some)
-                .map_err(|_| GitPilotError::Credential("credential is not UTF-8".into())),
-            Err(error) if error.code() == -25300 => Ok(None),
+        match Self::entry(kind, id)?.get_password() {
+            Ok(secret) => Ok(Some(secret)),
+            Err(keyring::Error::NoEntry) => Ok(None),
             Err(error) => Err(GitPilotError::Credential(format!(
-                "Keychain read failed ({})",
-                error.code()
+                "credential read failed: {error}"
             ))),
         }
     }
 
     fn delete(&self, kind: CredentialKind, id: &str) -> Result<()> {
-        use security_framework::passwords::delete_generic_password;
-        match delete_generic_password(SERVICE, &account_key(kind, id)) {
+        match Self::entry(kind, id)?.delete_credential() {
             Ok(()) => Ok(()),
-            Err(error) if error.code() == -25300 => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()),
             Err(error) => Err(GitPilotError::Credential(format!(
-                "Keychain delete failed ({})",
-                error.code()
+                "credential delete failed: {error}"
             ))),
         }
     }
@@ -86,30 +88,37 @@ impl CredentialStore for KeychainStore {
     }
 }
 
-/// Deliberately refuses to persist secrets on platforms without a reviewed
-/// native credential backend. A plaintext fallback would violate the security
-/// contract.
-#[cfg(not(target_os = "macos"))]
+/// Linux currently has no cached, reviewed Secret Service backend in the
+/// reproducible offline build. Refuse storage rather than silently selecting
+/// keyring's volatile mock store.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub struct UnsupportedStore;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 impl UnsupportedStore {
     pub fn new() -> Self {
         Self
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+impl Default for UnsupportedStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 impl CredentialStore for UnsupportedStore {
     fn set(&self, _kind: CredentialKind, _id: &str, _secret: &str) -> Result<()> {
         Err(GitPilotError::Unsupported(
-            "secure credential storage requires a platform adapter".into(),
+            "secure credential storage on Linux requires a reviewed Secret Service backend".into(),
         ))
     }
 
     fn get(&self, _kind: CredentialKind, _id: &str) -> Result<Option<String>> {
         Err(GitPilotError::Unsupported(
-            "secure credential storage requires a platform adapter".into(),
+            "secure credential storage on Linux requires a reviewed Secret Service backend".into(),
         ))
     }
 
@@ -122,12 +131,12 @@ impl CredentialStore for UnsupportedStore {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn platform_store() -> std::sync::Arc<dyn CredentialStore> {
     std::sync::Arc::new(KeychainStore::new())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn platform_store() -> std::sync::Arc<dyn CredentialStore> {
     std::sync::Arc::new(UnsupportedStore::new())
 }

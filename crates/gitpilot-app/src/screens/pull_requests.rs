@@ -295,9 +295,13 @@ fn load_detail(
     tx: &UnboundedSender<UiEvent>,
 ) {
     state.pr_loading = true;
+    state.reviewer_recommendations.clear();
     let service = Arc::clone(service);
     let tx = tx.clone();
     runtime.spawn(async move {
+        if let Ok(rows) = service.reviewer_recommendations(&id).await {
+            let _ = tx.send(UiEvent::ReviewerRecommendations(rows));
+        }
         match service.pr_detail(&id).await {
             Ok(detail) => {
                 let _ = tx.send(UiEvent::PrDetail(Box::new(detail)));
@@ -701,6 +705,32 @@ fn overview_tab(
                         );
                     }
                 }
+            if !explanation.review_focus.is_empty() {
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("REVIEW FOCUS")
+                        .size(9.0)
+                        .strong()
+                        .color(tokens.text_faint),
+                );
+                for path in &explanation.review_focus {
+                    ui.label(
+                        RichText::new(format!("· {path}"))
+                            .monospace()
+                            .size(10.0)
+                            .color(tokens.warning),
+                    );
+                }
+            }
+            for citation in &explanation.citations {
+                if let Some(url) = &citation.url
+                    && ui
+                        .link(RichText::new(format!("Evidence: {}", citation.label)).size(10.0))
+                        .clicked()
+                {
+                    let _ = webbrowser::open(url);
+                }
+            }
             });
         } else {
             components::empty_state(
@@ -753,13 +783,68 @@ fn overview_tab(
         components::panel(tokens).show(right, |ui| {
             components::kv(ui, tokens, "Human review", detail.pull_request.review_state.label());
             components::kv(ui, tokens, "Checks", detail.pull_request.check_state.label());
-            components::kv(ui, tokens, "Mergeability", &format!("{:?}", detail.pull_request.mergeable));
+            components::kv(ui, tokens, "Mergeability", detail.pull_request.mergeable.label());
             components::kv(ui, tokens, "Draft", if detail.pull_request.draft { "yes" } else { "no" });
+            for item in &detail.merge_readiness {
+                ui.horizontal_wrapped(|ui| {
+                    components::evidence_chip(ui, tokens, item.kind, None);
+                    ui.label(
+                        RichText::new(&item.text)
+                            .size(10.0)
+                            .color(tokens.text_muted),
+                    );
+                });
+            }
             if detail.pull_request.is_ready() {
                 ui.label(
                     RichText::new("Signals indicate ready, but approval/merge still requires explicit action.")
                         .size(10.5)
                         .color(tokens.warning),
+                );
+            }
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Reviewer suggestions")
+                    .size(10.0)
+                    .strong()
+                    .color(tokens.text_faint),
+            );
+            if state.reviewer_recommendations.is_empty() {
+                ui.label(
+                    RichText::new(
+                        "No evidence-backed reviewer suggestion. Suggestions require CODEOWNERS or review-workload evidence and are never auto-assigned.",
+                    )
+                    .size(9.5)
+                    .color(tokens.text_faint),
+                );
+            }
+            for recommendation in state.reviewer_recommendations.iter().take(5) {
+                ui.horizontal_wrapped(|ui| {
+                    components::badge(ui, tokens, &recommendation.login, tokens.info);
+                    ui.label(
+                        RichText::new(format!(
+                            "{:.0}% confidence · {} current request(s)",
+                            recommendation.confidence * 100.0,
+                            recommendation.workload_requests
+                        ))
+                        .size(9.5)
+                        .color(tokens.text_muted),
+                    );
+                    for reason in recommendation.reasons.iter().take(2) {
+                        components::evidence_chip(ui, tokens, reason.kind, None);
+                    }
+                });
+                ui.label(
+                    RichText::new(
+                        recommendation
+                            .reasons
+                            .iter()
+                            .map(|reason| reason.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    )
+                    .size(9.5)
+                    .color(tokens.text_faint),
                 );
             }
         });
