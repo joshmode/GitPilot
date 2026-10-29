@@ -264,6 +264,36 @@ impl AppService {
         self.git.connect(token, host).await
     }
 
+    pub async fn start_github_device_flow(
+        &self,
+        client_id: &str,
+        host: &str,
+    ) -> Result<DeviceFlowStart> {
+        let start = self
+            .git
+            .start_device_flow(client_id, host, "read:user read:org repo")
+            .await?;
+        self.store.set_setting("oauth_client_id", client_id).await?;
+        Ok(start)
+    }
+
+    pub async fn poll_github_device_flow(
+        &self,
+        host: &str,
+        device_code: &str,
+    ) -> Result<DeviceFlowPoll> {
+        let client_id = self
+            .store
+            .get_setting("oauth_client_id")
+            .await?
+            .ok_or_else(|| {
+                GitPilotError::AuthRequired("GitHub OAuth client ID is not configured".into())
+            })?;
+        self.git
+            .poll_device_flow(&client_id, host, device_code)
+            .await
+    }
+
     pub async fn discover_repositories(
         &self,
         account_id: &str,
@@ -435,8 +465,26 @@ impl AppService {
     async fn after_sync(&self) -> Result<()> {
         let dashboard = intelligence::dashboard(&self.store).await?;
         let policies = self.store.load_settings().await?;
-        if policies.notifications_enabled {
+        if policies.notifications_enabled && notifications_allowed_now(&policies) {
             for alert in dashboard.alerts.into_iter().take(20) {
+                let allowed_for_repo = match alert.object_id.as_deref() {
+                    Some(id) => self
+                        .store
+                        .pull_request(id)
+                        .await
+                        .ok()
+                        .and_then(|pr| {
+                            policies
+                                .per_repository_notifications
+                                .get(&pr.repository_id)
+                                .copied()
+                        })
+                        .unwrap_or(true),
+                    None => true,
+                };
+                if !allowed_for_repo {
+                    continue;
+                }
                 let kind = if alert.title.contains("CI") {
                     "ci_failed"
                 } else if alert.title.contains("stale") {
@@ -456,7 +504,10 @@ impl AppService {
                         created_at: Utc::now(),
                         read_at: None,
                         snoozed_until: None,
-                        dedupe_key: format!("alert:{}", alert.id),
+                        // Include observed state in the key so a dismissed
+                        // notification can recur when the alert materially
+                        // changes, while identical refreshes stay deduplicated.
+                        dedupe_key: format!("alert:{}:{}", alert.id, alert.title),
                         url: alert.url,
                     })
                     .await;
@@ -522,26 +573,96 @@ impl AppService {
         let comments = self.store.review_comments(id).await?;
         let commits = self
             .store
-            .commits(Some(&pr.repository_id), 30)
+            .commits(Some(&pr.repository_id), 200)
             .await?
             .into_iter()
-            .filter(|c| c.pr_number == Some(pr.number) || c.parents.contains(&pr.base_sha))
+            .filter(|c| c.pr_number == Some(pr.number))
             .collect();
         let files = self.store.pr_files(id).await?;
         let findings = self.store.findings(id).await?;
+        let latest_run = self.store.review_runs(id).await?.into_iter().next();
         let summary = self.load_pr_explanation(id).await?;
+        let issues = self.store.issues(Some(&pr.repository_id), false).await?;
+        let linked_issues = linked_issues(&pr, &issues);
+        let related_prs = self
+            .store
+            .pull_requests(&PrFilter {
+                repository_id: Some(pr.repository_id.clone()),
+                limit: 200,
+                ..Default::default()
+            })
+            .await?
+            .into_iter()
+            .filter(|other| {
+                other.id != pr.id
+                    && (other.head_sha == pr.base_sha
+                        || other.base_sha == pr.head_sha
+                        || share_issue(&pr, other, &linked_issues))
+            })
+            .collect();
         Ok(PrDetail {
             pull_request: pr,
             checks,
             comments,
             commits,
             files,
-            linked_issues: vec![],
-            related_prs: vec![],
+            linked_issues,
+            related_prs,
             findings,
             summary,
-            diff_freshness: None,
+            diff_freshness: latest_run.as_ref().map(|run| run.started_at),
+            latest_review_run: latest_run,
         })
+    }
+
+    pub async fn repository_file(
+        &self,
+        repository_id: &str,
+        path: &str,
+        git_ref: &str,
+    ) -> Result<String> {
+        let repo = self.store.repository(repository_id).await?;
+        let account = self
+            .store
+            .accounts()
+            .await?
+            .into_iter()
+            .find(|account| account.id == repo.account_id)
+            .ok_or_else(|| {
+                GitPilotError::AuthRequired("repository account is not connected".into())
+            })?;
+        let client = self.git.client_for(&account.id, &account.host)?;
+        client
+            .get_repository_file(&repo.owner, &repo.name, path, git_ref, 512 * 1024)
+            .await
+    }
+
+    pub async fn github_compare(
+        &self,
+        repository_id: &str,
+        base: &str,
+        head: &str,
+    ) -> Result<String> {
+        let repo = self.store.repository(repository_id).await?;
+        if repo.origin != DataOrigin::GitHub {
+            return Err(GitPilotError::Validation(
+                "GitHub comparison requires a live repository".into(),
+            ));
+        }
+        let account = self
+            .store
+            .accounts()
+            .await?
+            .into_iter()
+            .find(|account| account.id == repo.account_id)
+            .ok_or_else(|| {
+                GitPilotError::AuthRequired("repository account is not connected".into())
+            })?;
+        let client = self.git.client_for(&account.id, &account.host)?;
+        let value = client
+            .repository_compare(&repo.owner, &repo.name, base, head)
+            .await?;
+        Ok(serde_json::to_string_pretty(&value)?)
     }
 
     pub async fn explain_pr(&self, id: &str, cancel: &CancellationToken) -> Result<AiExplanation> {
@@ -604,6 +725,29 @@ impl AppService {
                     kind: EvidenceKind::Observed,
                 })
                 .collect(),
+            file_notes: detail
+                .files
+                .iter()
+                .take(20)
+                .map(|file| FileExplanation {
+                    path: file.path.clone(),
+                    summary: format!(
+                        "{} file; +{} −{}; {} hunk(s). Review the authoritative diff for exact lines.",
+                        match file.status {
+                            DiffStatus::Added => "Added",
+                            DiffStatus::Deleted => "Deleted",
+                            DiffStatus::Renamed => "Renamed",
+                            DiffStatus::Modified => "Modified",
+                        },
+                        file.additions,
+                        file.deletions,
+                        file.hunks.len()
+                    ),
+                    status: format!("{:?}", file.status),
+                    additions: file.additions,
+                    deletions: file.deletions,
+                })
+                .collect(),
             input_tokens: response.input_tokens,
             output_tokens: response.output_tokens,
             estimated_cost_usd: response.estimated_cost_usd,
@@ -642,6 +786,7 @@ impl AppService {
             review_focus: vec![],
             uncertainties: vec!["Cached explanation; regenerate after PR updates.".into()],
             citations: vec![],
+            file_notes: vec![],
             input_tokens: 0,
             output_tokens: 0,
             estimated_cost_usd: 0.0,
@@ -781,6 +926,7 @@ impl AppService {
                 object_id: Some(commit.id),
                 kind: EvidenceKind::Observed,
             }],
+            file_notes: vec![],
             input_tokens: response.input_tokens,
             output_tokens: response.output_tokens,
             estimated_cost_usd: response.estimated_cost_usd,
@@ -910,6 +1056,7 @@ impl AppService {
                     },
                 })
                 .collect(),
+            file_notes: vec![],
             input_tokens: response.input_tokens,
             output_tokens: response.output_tokens,
             estimated_cost_usd: response.estimated_cost_usd,
@@ -946,6 +1093,19 @@ impl AppService {
         cancel: &CancellationToken,
     ) -> Result<LocalStatus> {
         LocalGit::status(path, cancel).await
+    }
+
+    pub async fn local_search(
+        &self,
+        path: &str,
+        query: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<String>> {
+        permissions::require(
+            &self.store.load_permissions().await?,
+            Permission::IndexRepository,
+        )?;
+        LocalGit::search(path, query, cancel).await
     }
 
     pub async fn run_command(
@@ -1091,6 +1251,11 @@ impl AppService {
     pub async fn test_provider(&self, provider_id: &str) -> Result<()> {
         let router = self.router.read().handle();
         router.health(provider_id).await
+    }
+
+    pub async fn discover_models(&self, provider_id: &str) -> Result<Vec<String>> {
+        let router = self.router.read().handle();
+        router.discover_models(provider_id).await
     }
 
     pub async fn save_routing(&self, policy: &RoutingPolicy) -> Result<()> {
@@ -1282,6 +1447,27 @@ impl AppService {
         self.store.mark_notification_read(id).await
     }
 
+    pub async fn set_repository_notifications(
+        &self,
+        repository_id: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        self.store
+            .set_notification_policy(repository_id, enabled)
+            .await
+    }
+
+    pub async fn notification_settings(
+        &self,
+    ) -> Result<(bool, Option<String>, BTreeMap<String, bool>)> {
+        let settings = self.store.load_settings().await?;
+        Ok((
+            settings.notifications_enabled,
+            settings.quiet_hours,
+            settings.per_repository_notifications,
+        ))
+    }
+
     pub async fn snooze_notification(&self, id: &str) -> Result<()> {
         self.store
             .snooze_notification(id, Utc::now() + chrono::Duration::hours(4))
@@ -1400,6 +1586,14 @@ impl AppService {
         if dependency_changes.is_empty() {
             missing.push("Dependency changes were not detected in cached file lists".into());
         }
+        let mut migration_changes = Vec::new();
+        for pr in &merged {
+            for path in self.store.pr_file_paths(&pr.id).await.unwrap_or_default() {
+                if path.contains("migration") || path.ends_with(".sql") || path.contains("schema") {
+                    migration_changes.push(format!("#{} · {path}", pr.number));
+                }
+            }
+        }
         let mut draft_notes = format!(
             "# Release notes {} — {}\n\nGenerated from cached repository metadata. Review before use.\n\n",
             release
@@ -1438,6 +1632,7 @@ impl AppService {
             groups,
             breaking_changes,
             dependency_changes,
+            migration_changes,
             blockers,
             readiness,
             draft_notes,
@@ -1581,6 +1776,108 @@ impl AppService {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)] // Release publication is a typed external-mutation boundary.
+    pub async fn publish_release(
+        &self,
+        repository_id: &str,
+        tag_name: &str,
+        name: &str,
+        body: &str,
+        draft: bool,
+        prerelease: bool,
+        confirmed: bool,
+    ) -> Result<String> {
+        let permissions = self.store.load_permissions().await?;
+        permissions::require(&permissions, Permission::ModifyGitHub)?;
+        if !confirmed {
+            return Err(GitPilotError::PermissionDenied(
+                "Publishing a release requires explicit confirmation".into(),
+            ));
+        }
+        if tag_name.trim().is_empty() {
+            return Err(GitPilotError::Validation("release tag is required".into()));
+        }
+        let repo = self.store.repository(repository_id).await?;
+        if repo.origin != DataOrigin::GitHub {
+            return Err(GitPilotError::Validation(
+                "demo repositories cannot be mutated".into(),
+            ));
+        }
+        let created = self
+            .git
+            .create_release(&repo, tag_name, name, body, draft, prerelease)
+            .await?;
+        self.store
+            .audit(&AuditEvent {
+                id: Uuid::new_v4().to_string(),
+                occurred_at: Utc::now(),
+                actor: "local-user".into(),
+                action: "github.release.create".into(),
+                target: created.html_url.clone(),
+                outcome: "success".into(),
+                metadata: serde_json::json!({
+                    "tag": created.tag_name,
+                    "draft": draft,
+                    "prerelease": prerelease,
+                    "repository": repo.full_name,
+                }),
+            })
+            .await?;
+        Ok(created.html_url)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn publish_review_comment(
+        &self,
+        pull_request_id: &str,
+        path: &str,
+        line: i64,
+        side: &str,
+        body: &str,
+        confirmed: bool,
+    ) -> Result<()> {
+        let permissions = self.store.load_permissions().await?;
+        permissions::require(&permissions, Permission::PublishReviews)?;
+        if !confirmed {
+            return Err(GitPilotError::PermissionDenied(
+                "Publishing a review comment requires explicit confirmation".into(),
+            ));
+        }
+        let pr = self.store.pull_request(pull_request_id).await?;
+        if pr.origin != DataOrigin::GitHub {
+            return Err(GitPilotError::Validation(
+                "demo pull requests cannot be mutated".into(),
+            ));
+        }
+        let files = self.store.pr_files(pull_request_id).await?;
+        if !crate::diff::validate_anchor(&files, path, line) {
+            return Err(GitPilotError::Validation(
+                "comment line is not present in the validated diff".into(),
+            ));
+        }
+        let repo = self.store.repository(&pr.repository_id).await?;
+        self.git
+            .create_review_comment(&repo, pr.number, body, &pr.head_sha, path, line, side)
+            .await?;
+        self.store
+            .audit(&AuditEvent {
+                id: Uuid::new_v4().to_string(),
+                occurred_at: Utc::now(),
+                actor: "local-user".into(),
+                action: "github.review.comment".into(),
+                target: pr.html_url.clone(),
+                outcome: "success".into(),
+                metadata: serde_json::json!({
+                    "path": path,
+                    "line": line,
+                    "side": side,
+                    "head_sha": pr.head_sha,
+                }),
+            })
+            .await?;
+        Ok(())
+    }
+
     pub async fn save_view(&self, screen: &str, name: &str, query: &str) -> Result<()> {
         self.store
             .save_view(&SavedView {
@@ -1592,5 +1889,51 @@ impl AppService {
                 created_at: Utc::now(),
             })
             .await
+    }
+}
+
+fn linked_issues(pr: &PullRequest, issues: &[Issue]) -> Vec<Issue> {
+    let haystack = format!("{}\n{}\n{}", pr.title, pr.body, pr.head_ref).to_ascii_lowercase();
+    issues
+        .iter()
+        .filter(|issue| {
+            haystack.contains(&format!("#{}", issue.number))
+                || haystack.contains(&format!("issue {}", issue.number))
+                || haystack.contains(&format!("issues/{}", issue.number))
+        })
+        .cloned()
+        .collect()
+}
+
+fn share_issue(pr: &PullRequest, other: &PullRequest, linked: &[Issue]) -> bool {
+    let haystack = format!("{}\n{}", other.title, other.body).to_ascii_lowercase();
+    linked.iter().any(|issue| {
+        haystack.contains(&format!("#{}", issue.number))
+            || haystack.contains(&format!("issues/{}", issue.number))
+    }) || pr.milestone.is_some() && pr.milestone == other.milestone
+}
+
+fn notifications_allowed_now(settings: &AppSettings) -> bool {
+    let Some(range) = &settings.quiet_hours else {
+        return true;
+    };
+    let Some((start, end)) = range.split_once('-') else {
+        return true;
+    };
+    let parse = |value: &str| -> Option<(u32, u32)> {
+        let (hour, minute) = value.trim().split_once(':')?;
+        Some((hour.parse().ok()?, minute.parse().ok()?))
+    };
+    let (Some(start), Some(end)) = (parse(start), parse(end)) else {
+        return true;
+    };
+    use chrono::Timelike;
+    let now = chrono::Local::now();
+    let current = (now.hour(), now.minute());
+    if start <= end {
+        !(current >= start && current < end)
+    } else {
+        // Overnight quiet hours, for example 22:00-07:00.
+        !(current >= start || current < end)
     }
 }

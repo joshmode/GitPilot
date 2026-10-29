@@ -70,6 +70,24 @@ pub struct Account {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceFlowStart {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub expires_in: i64,
+    pub interval: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DeviceFlowPoll {
+    Pending,
+    SlowDown,
+    Authorized(Account),
+    Denied,
+    Expired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repository {
     pub id: Id,
     pub account_id: Id,
@@ -326,6 +344,7 @@ pub struct ReleaseReport {
     pub groups: BTreeMap<String, Vec<Id>>,
     pub breaking_changes: Vec<EvidenceStatement>,
     pub dependency_changes: Vec<String>,
+    pub migration_changes: Vec<String>,
     pub blockers: Vec<EvidenceStatement>,
     pub readiness: Vec<EvidenceStatement>,
     pub draft_notes: String,
@@ -491,6 +510,7 @@ pub struct PrDetail {
     pub findings: Vec<ReviewFinding>,
     pub summary: Option<AiExplanation>,
     pub diff_freshness: Option<DateTime<Utc>>,
+    pub latest_review_run: Option<ReviewRun>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -505,9 +525,19 @@ pub struct AiExplanation {
     pub review_focus: Vec<String>,
     pub uncertainties: Vec<String>,
     pub citations: Vec<EvidenceRef>,
+    pub file_notes: Vec<FileExplanation>,
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub estimated_cost_usd: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileExplanation {
+    pub path: String,
+    pub summary: String,
+    pub status: String,
+    pub additions: i64,
+    pub deletions: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -871,6 +901,7 @@ pub struct AppSettings {
     pub default_provider_id: Option<String>,
     pub notifications_enabled: bool,
     pub quiet_hours: Option<String>,
+    pub per_repository_notifications: BTreeMap<String, bool>,
     pub log_retention_days: i64,
     pub sync_interval_minutes: i64,
 }
@@ -886,6 +917,7 @@ impl Default for AppSettings {
             default_provider_id: None,
             notifications_enabled: true,
             quiet_hours: None,
+            per_repository_notifications: BTreeMap::new(),
             log_retention_days: 30,
             sync_interval_minutes: 5,
         }

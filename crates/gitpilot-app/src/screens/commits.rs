@@ -90,8 +90,7 @@ pub fn show(
                         .await
                         {
                             Ok(diff) => {
-                                let _ = tx
-                                    .send(UiEvent::CommandOutput(format!("git compare\n\n{diff}")));
+                                let _ = tx.send(UiEvent::CompareResult(diff));
                             }
                             Err(error) => {
                                 let _ = tx.send(UiEvent::Error(error.user_message()));
@@ -103,9 +102,65 @@ pub fn show(
                         Some("Connect a local repository before comparing revisions.".into());
                 }
             }
+            if ui.button("Compare via GitHub").clicked() {
+                if let Some(repo) = state
+                    .bootstrap
+                    .repositories
+                    .iter()
+                    .find(|repo| repo.origin == gitpilot_core::DataOrigin::GitHub)
+                    .cloned()
+                {
+                    let left = state.commit_compare_left.clone();
+                    let right = state.commit_compare_right.clone();
+                    let service = Arc::clone(service);
+                    let tx = tx.clone();
+                    runtime.spawn(async move {
+                        match service.github_compare(&repo.id, &left, &right).await {
+                            Ok(value) => {
+                                let _ = tx.send(UiEvent::CompareResult(format!(
+                                    "GitHub compare {}...{}\n{}",
+                                    left, right, value
+                                )));
+                            }
+                            Err(error) => {
+                                let _ = tx.send(UiEvent::Error(error.user_message()));
+                            }
+                        }
+                    });
+                } else {
+                    state.error = Some("No live GitHub repository is available.".into());
+                }
+            }
         });
     });
     ui.add_space(8.0);
+    if let Some(result) = state.compare_result.clone() {
+        let mut clear = false;
+        components::panel(tokens).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Comparison")
+                        .size(12.0)
+                        .strong()
+                        .color(tokens.text),
+                );
+                if ui.small_button("Clear").clicked() {
+                    clear = true;
+                }
+            });
+            egui::ScrollArea::both().max_height(160.0).show(ui, |ui| {
+                ui.label(
+                    RichText::new(&result)
+                        .monospace()
+                        .size(9.5)
+                        .color(tokens.text_muted),
+                );
+            });
+        });
+        if clear {
+            state.compare_result = None;
+        }
+    }
     for commit in state.commits.iter().filter(|c| {
         state.commit_search.trim().is_empty()
             || c.message
@@ -172,6 +227,9 @@ pub fn show(
             let service = Arc::clone(service);
             let tx = tx.clone();
             runtime.spawn(async move {
+                if let Ok(detail) = service.commit_detail(&id).await {
+                    let _ = tx.send(UiEvent::CommitDetail(Box::new(detail)));
+                }
                 match service.commit_files(&id).await {
                     Ok(files) => {
                         let _ = tx.send(UiEvent::CommitFiles(files));
@@ -214,6 +272,36 @@ pub fn show(
                     .size(11.5)
                     .color(tokens.text_muted),
             );
+        });
+    }
+    if let Some(commit) = &state.selected_commit_detail {
+        components::divider(ui, tokens);
+        components::section_header(
+            ui,
+            tokens,
+            "Selected commit",
+            Some("Metadata from the repository; no authorship inference"),
+        );
+        components::panel(tokens).show(ui, |ui| {
+            components::kv(
+                ui,
+                tokens,
+                "SHA",
+                &commit.sha.chars().take(12).collect::<String>(),
+            );
+            components::kv(ui, tokens, "Author", &commit.author_name);
+            components::kv(ui, tokens, "Parents", &commit.parents.join(", "));
+            components::kv(ui, tokens, "Committed", &commit.committed_at.to_rfc3339());
+            if !commit.message.trim().is_empty() {
+                ui.label(
+                    RichText::new(&commit.message)
+                        .size(10.5)
+                        .color(tokens.text_muted),
+                );
+            }
+            if ui.small_button("Open commit on GitHub").clicked() {
+                let _ = webbrowser::open(&commit.html_url);
+            }
         });
     }
     if !state.commit_files.is_empty() {

@@ -678,6 +678,53 @@ fn notifications(
             &mut state.bootstrap.settings.demo_enabled,
             "Demo profile available on first launch",
         );
+        ui.label(
+            RichText::new("People analytics visibility")
+                .size(11.0)
+                .color(tokens.text_faint),
+        );
+        ui.label(
+            RichText::new(
+                "Individual analytics are intentionally unavailable. Contributor views show team-level assignments and review bottlenecks only.",
+            )
+            .size(10.0)
+            .color(tokens.text_muted),
+        );
+        let mut per_repo = state
+            .bootstrap
+            .settings
+            .per_repository_notifications
+            .clone();
+        for repo in state
+            .bootstrap
+            .repositories
+            .iter()
+            .filter(|repo| repo.origin == gitpilot_core::DataOrigin::GitHub)
+        {
+            let enabled = per_repo.entry(repo.id.clone()).or_insert(true);
+            ui.checkbox(enabled, format!("Notify for {}", repo.full_name));
+        }
+        state.bootstrap.settings.per_repository_notifications = per_repo;
+        ui.horizontal(|ui| {
+            ui.label("Quiet hours");
+            let mut value = state
+                .bootstrap
+                .settings
+                .quiet_hours
+                .clone()
+                .unwrap_or_default();
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut value)
+                        .hint_text("22:00-07:00")
+                        .desired_width(130.0),
+                )
+                .changed()
+            {
+                state.bootstrap.settings.quiet_hours =
+                    (!value.trim().is_empty()).then(|| value.trim().into());
+            }
+        });
         ui.horizontal(|ui| {
             ui.label("Sync interval");
             ui.add(

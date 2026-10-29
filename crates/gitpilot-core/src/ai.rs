@@ -946,6 +946,14 @@ impl RouterHandle {
             .health()
             .await
     }
+
+    pub async fn discover_models(&self, provider_id: &str) -> Result<Vec<String>> {
+        self.providers
+            .get(provider_id)
+            .ok_or_else(|| GitPilotError::NotFound("provider".into()))?
+            .discover_models()
+            .await
+    }
 }
 
 pub fn parse_structured<T: serde::de::DeserializeOwned>(text: &str) -> Result<T> {

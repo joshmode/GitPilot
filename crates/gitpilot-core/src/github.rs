@@ -271,6 +271,66 @@ impl GitHubClient {
         Ok(bytes.to_vec())
     }
 
+    /// Download a bounded raw file from a repository at a branch/ref. This is
+    /// used for local-context retrieval and never for automatic execution.
+    pub async fn get_repository_file(
+        &self,
+        owner: &str,
+        name: &str,
+        path: &str,
+        git_ref: &str,
+        max_bytes: usize,
+    ) -> Result<String> {
+        if path.is_empty()
+            || path.starts_with('/')
+            || path.contains("..")
+            || path.contains('\0')
+            || git_ref.contains("..")
+        {
+            return Err(GitPilotError::Validation(
+                "invalid repository file path or ref".into(),
+            ));
+        }
+        let encoded = path
+            .split('/')
+            .map(|segment| {
+                url::form_urlencoded::byte_serialize(segment.as_bytes()).collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        self.get_text(
+            &format!("/repos/{owner}/{name}/contents/{encoded}?ref={}", git_ref),
+            max_bytes,
+        )
+        .await
+    }
+
+    pub async fn repository_compare(
+        &self,
+        owner: &str,
+        name: &str,
+        base: &str,
+        head: &str,
+    ) -> Result<serde_json::Value> {
+        if base.is_empty()
+            || head.is_empty()
+            || base.starts_with('-')
+            || head.starts_with('-')
+            || base.contains("..")
+            || head.contains("..")
+        {
+            return Err(GitPilotError::Validation(
+                "invalid comparison revision".into(),
+            ));
+        }
+        let base = url::form_urlencoded::byte_serialize(base.as_bytes()).collect::<String>();
+        let head = url::form_urlencoded::byte_serialize(head.as_bytes()).collect::<String>();
+        self.get_json::<serde_json::Value>(&format!(
+            "/repos/{owner}/{name}/compare/{base}...{head}"
+        ))
+        .await
+    }
+
     pub async fn get_text(&self, path: &str, max_bytes: usize) -> Result<String> {
         let response = self
             .request::<serde_json::Value>(Method::GET, path, None)
@@ -283,13 +343,31 @@ impl GitHubClient {
                 "remote file exceeds the configured content limit".into(),
             ));
         }
-        let bytes = response.bytes().await.map_err(network_error)?;
-        if bytes.len() > max_bytes {
+        let value: serde_json::Value =
+            response
+                .json()
+                .await
+                .map_err(|error| GitPilotError::GitHub {
+                    status: 200,
+                    message: format!("invalid contents response: {error}"),
+                })?;
+        let encoded = value
+            .get("content")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| GitPilotError::GitHub {
+                status: 200,
+                message: "GitHub returned no file content".into(),
+            })?;
+        if value.get("size").and_then(|v| v.as_u64()).unwrap_or(0) > max_bytes as u64 {
             return Err(GitPilotError::InvalidInput(
                 "remote file exceeds the configured content limit".into(),
             ));
         }
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded.replace('\n', ""))
+            .map_err(|_| GitPilotError::Validation("invalid base64 file content".into()))?;
+        Ok(String::from_utf8_lossy(&bytes[..bytes.len().min(max_bytes)]).into_owned())
     }
 
     fn request<B: serde::Serialize>(
@@ -863,6 +941,13 @@ pub struct CreatedIssue {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct WireCreatedRelease {
+    pub id: u64,
+    pub tag_name: String,
+    pub html_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct WireRepositoryPermission {
     pub permission: Option<String>,
 }
@@ -940,6 +1025,120 @@ impl GitHubService {
             })
             .await?;
         Ok(account)
+    }
+
+    #[allow(clippy::too_many_arguments)] // Device flow protocol fields stay explicit.
+    pub async fn start_device_flow(
+        &self,
+        client_id: &str,
+        host: &str,
+        scope: &str,
+    ) -> Result<DeviceFlowStart> {
+        let host = validate_github_host(host)?;
+        if client_id.trim().is_empty() || client_id.len() > 200 {
+            return Err(GitPilotError::Validation(
+                "GitHub OAuth client ID is required".into(),
+            ));
+        }
+        let endpoint = if host == "github.com" {
+            "https://github.com/login/device/code".to_string()
+        } else {
+            format!("https://{host}/login/device/code")
+        };
+        let form = [("client_id", client_id), ("scope", scope)]
+            .iter()
+            .map(|(key, value)| {
+                format!(
+                    "{}={}",
+                    key,
+                    url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+        let response = reqwest::Client::new()
+            .post(endpoint)
+            .header(ACCEPT, "application/json")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(form)
+            .send()
+            .await
+            .map_err(network_error)?;
+        let value: serde_json::Value = response
+            .error_for_status()
+            .map_err(network_error)?
+            .json()
+            .await
+            .map_err(network_error)?;
+        Ok(DeviceFlowStart {
+            device_code: value["device_code"]
+                .as_str()
+                .ok_or_else(|| GitPilotError::Provider("missing device code".into()))?
+                .into(),
+            user_code: value["user_code"].as_str().unwrap_or("").into(),
+            verification_uri: value["verification_uri"]
+                .as_str()
+                .unwrap_or("https://github.com/login/device")
+                .into(),
+            expires_in: value["expires_in"].as_i64().unwrap_or(900),
+            interval: value["interval"].as_i64().unwrap_or(5),
+        })
+    }
+
+    pub async fn poll_device_flow(
+        &self,
+        client_id: &str,
+        host: &str,
+        device_code: &str,
+    ) -> Result<DeviceFlowPoll> {
+        let host = validate_github_host(host)?;
+        let endpoint = if host == "github.com" {
+            "https://github.com/login/oauth/access_token".to_string()
+        } else {
+            format!("https://{host}/login/oauth/access_token")
+        };
+        let form = [
+            ("client_id", client_id),
+            ("device_code", device_code),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+        ]
+        .iter()
+        .map(|(key, value)| {
+            format!(
+                "{}={}",
+                key,
+                url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+        let response = reqwest::Client::new()
+            .post(endpoint)
+            .header(ACCEPT, "application/json")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(form)
+            .send()
+            .await
+            .map_err(network_error)?;
+        let value: serde_json::Value = response.json().await.map_err(network_error)?;
+        if let Some(token) = value["access_token"].as_str() {
+            let account = self.connect(token, &host).await?;
+            return Ok(DeviceFlowPoll::Authorized(account));
+        }
+        match value["error"].as_str().unwrap_or("") {
+            "authorization_pending" => Ok(DeviceFlowPoll::Pending),
+            "slow_down" => Ok(DeviceFlowPoll::SlowDown),
+            "expired_token" => Ok(DeviceFlowPoll::Expired),
+            "access_denied" => Ok(DeviceFlowPoll::Denied),
+            other => Err(GitPilotError::AuthRequired(format!(
+                "GitHub device authorization failed: {}",
+                if other.is_empty() {
+                    "unknown response"
+                } else {
+                    other
+                }
+            ))),
+        }
     }
 
     pub async fn disconnect(&self, account_id: &str) -> Result<()> {
@@ -1165,6 +1364,45 @@ impl GitHubService {
         Ok(issue)
     }
 
+    pub async fn create_release(
+        &self,
+        repo: &Repository,
+        tag_name: &str,
+        name: &str,
+        body: &str,
+        draft: bool,
+        prerelease: bool,
+    ) -> Result<WireCreatedRelease> {
+        if tag_name.trim().is_empty() || tag_name.len() > 200 || body.len() > 120_000 {
+            return Err(GitPilotError::Validation(
+                "release tag or body is outside the accepted size".into(),
+            ));
+        }
+        let account = self
+            .store
+            .accounts()
+            .await?
+            .into_iter()
+            .find(|a| a.id == repo.account_id)
+            .ok_or_else(|| {
+                GitPilotError::AuthRequired("repository account is not connected".into())
+            })?;
+        let client = self.client_for(&account.id, &account.host)?;
+        client
+            .post_json::<WireCreatedRelease, _>(
+                &format!("/repos/{}/{}/releases", repo.owner, repo.name),
+                &serde_json::json!({
+                    "tag_name": tag_name,
+                    "target_commitish": repo.default_branch,
+                    "name": name,
+                    "body": body,
+                    "draft": draft,
+                    "prerelease": prerelease,
+                }),
+            )
+            .await
+    }
+
     pub async fn review_pull_request(
         &self,
         repo: &Repository,
@@ -1196,6 +1434,56 @@ impl GitHubService {
                     "commit_id": head_sha,
                     "event": event,
                     "body": body,
+                }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_review_comment(
+        &self,
+        repo: &Repository,
+        number: i64,
+        body: &str,
+        commit_id: &str,
+        path: &str,
+        line: i64,
+        side: &str,
+    ) -> Result<()> {
+        if body.trim().is_empty()
+            || body.len() > 60_000
+            || path.is_empty()
+            || path.contains("..")
+            || line <= 0
+            || !matches!(side, "LEFT" | "RIGHT")
+        {
+            return Err(GitPilotError::Validation(
+                "invalid review comment location or body".into(),
+            ));
+        }
+        let account = self
+            .store
+            .accounts()
+            .await?
+            .into_iter()
+            .find(|a| a.id == repo.account_id)
+            .ok_or_else(|| {
+                GitPilotError::AuthRequired("repository account is not connected".into())
+            })?;
+        let client = self.client_for(&account.id, &account.host)?;
+        let _: serde_json::Value = client
+            .post_json(
+                &format!(
+                    "/repos/{}/{}/pulls/{}/comments",
+                    repo.owner, repo.name, number
+                ),
+                &serde_json::json!({
+                    "body": body,
+                    "commit_id": commit_id,
+                    "path": path,
+                    "line": line,
+                    "side": side,
                 }),
             )
             .await?;

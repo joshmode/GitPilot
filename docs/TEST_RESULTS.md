@@ -10,7 +10,7 @@ cargo check --workspace --offline
 
 cargo test --workspace --offline
   -> 31 core unit tests passed
-  -> 23 service/database integration tests passed
+  -> 26 service/database integration tests passed
   -> 0 app unit tests (GUI smoke tested separately)
 
 /opt/homebrew/Cellar/rust/1.99.1/bin/cargo-clippy --offline --workspace --all-targets -- -D warnings
@@ -55,7 +55,7 @@ The review pass also added regression coverage for:
 - automatic private-review execution once per PR head
 - persisted job dispatcher startup and runtime initialization
 
-Latest workspace test totals: **31 unit tests + 23 integration tests**, all
+Latest workspace test totals: **31 unit tests + 26 integration tests**, all
 passing. Strict Clippy and `cargo fmt --check` also pass.
 
 Final release-binary smoke test also initialized schema migration version 2,
@@ -65,7 +65,7 @@ Final release-binary smoke test also initialized schema migration version 2,
 Post-audit additions include a live job dispatcher, migration v1→v2 coverage,
 security-alert ingestion, release reports, commit diff retrieval, guarded
 GitHub write/review boundaries and source-link navigation fixes. The latest
-workspace run remains **31 unit + 23 integration tests**, all passing, with fmt
+workspace run remains **31 unit + 26 integration tests**, all passing, with fmt
 and strict Clippy clean.
 
 ## Not executed

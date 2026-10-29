@@ -166,6 +166,54 @@ async fn review_submission_is_denied_before_network_without_write_policy() {
 }
 
 #[tokio::test]
+async fn pr_detail_surfaces_cached_review_run_and_evidence_relationships() {
+    let temp = TempDir::new().unwrap();
+    let service = demo_service(&temp).await;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    service.run_review("pr-412", &cancel).await.unwrap();
+    let detail = service.pr_detail("pr-412").await.unwrap();
+    assert!(detail.latest_review_run.is_some());
+    assert!(detail.diff_freshness.is_some());
+    assert!(!detail.findings.is_empty());
+}
+
+#[tokio::test]
+async fn release_publication_is_denied_for_demo_repositories_before_network() {
+    let temp = TempDir::new().unwrap();
+    let service = demo_service(&temp).await;
+    let mut policy = service.store.load_permissions().await.unwrap();
+    policy.modify_github = true;
+    service.save_permissions(&policy).await.unwrap();
+    let result = service
+        .publish_release("repo-0001", "v9.0.0", "Demo", "notes", true, false, true)
+        .await;
+    assert!(matches!(
+        result,
+        Err(gitpilot_core::GitPilotError::Validation(_))
+    ));
+}
+
+#[tokio::test]
+async fn review_comment_requires_policy_and_valid_anchor_before_network() {
+    let temp = TempDir::new().unwrap();
+    let service = demo_service(&temp).await;
+    let result = service
+        .publish_review_comment(
+            "pr-412",
+            "src/auth/workspace.rs",
+            44,
+            "RIGHT",
+            "evidence",
+            true,
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(gitpilot_core::GitPilotError::PermissionDenied(_))
+    ));
+}
+
+#[tokio::test]
 async fn security_alerts_round_trip_with_explicit_states() {
     let temp = TempDir::new().unwrap();
     let service = demo_service(&temp).await;

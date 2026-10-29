@@ -102,6 +102,14 @@ impl Store {
             .await
     }
 
+    pub async fn set_notification_policy(&self, repository_id: &str, enabled: bool) -> Result<()> {
+        let mut settings = self.load_settings().await?;
+        settings
+            .per_repository_notifications
+            .insert(repository_id.into(), enabled);
+        self.save_settings(&settings).await
+    }
+
     pub async fn load_permissions(&self) -> Result<PermissionPolicy> {
         let Some(raw) = self.get_setting("permissions").await? else {
             return Ok(PermissionPolicy::default());

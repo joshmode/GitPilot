@@ -222,8 +222,120 @@ pub fn activity(
                     }
                 });
             }
+            if ui.button("Publish draft…").clicked()
+                && let Some(repo) = state
+                    .repository_scope
+                    .clone()
+                    .or_else(|| state.bootstrap.repositories.first().map(|r| r.id.clone()))
+            {
+                state.release_repository = Some(repo);
+                state.release_tag = state
+                    .release_report
+                    .as_ref()
+                    .map(|r| r.tag_name.clone())
+                    .unwrap_or_default();
+                state.release_draft = true;
+                state.release_prerelease = false;
+            }
         },
     );
+    if let Some(repo_id) = state.release_repository.clone() {
+        let mut tag = state.release_tag.clone();
+        let mut name = state.release_name.clone();
+        let mut body = state
+            .release_report
+            .as_ref()
+            .map(|r| r.draft_notes.clone())
+            .unwrap_or_default();
+        let mut draft = state.release_draft;
+        let mut prerelease = state.release_prerelease;
+        let mut confirm = false;
+        let mut close = false;
+        components::centered_modal(ui.ctx(), tokens, 620.0, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Publish GitHub release")
+                        .size(17.0)
+                        .strong()
+                        .color(tokens.text),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.label(
+                RichText::new(
+                    "This is an external mutation. Draft mode creates an unpublished release; publishing requires Modify GitHub permission and confirmation.",
+                )
+                .size(10.5)
+                .color(tokens.warning),
+            );
+            ui.horizontal(|ui| {
+                ui.label("Tag");
+                ui.add(egui::TextEdit::singleline(&mut tag).desired_width(180.0));
+                ui.label("Name");
+                ui.add(egui::TextEdit::singleline(&mut name).desired_width(260.0));
+            });
+            ui.checkbox(&mut draft, "Create as draft");
+            ui.checkbox(&mut prerelease, "Mark as prerelease");
+            ui.add(
+                egui::TextEdit::multiline(&mut body)
+                    .desired_rows(10)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Release notes"),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+                if ui
+                    .add(egui::Button::new("Create release").fill(tokens.accent))
+                    .clicked()
+                {
+                    confirm = true;
+                }
+                ui.label(
+                    RichText::new(format!(
+                        "Repository: {} · Modify GitHub: {}",
+                        state
+                            .bootstrap
+                            .repositories
+                            .iter()
+                            .find(|r| r.id == repo_id)
+                            .map(|r| r.full_name.as_str())
+                            .unwrap_or("—"),
+                        state.bootstrap.permissions.modify_github
+                    ))
+                    .size(9.5)
+                    .color(tokens.text_faint),
+                );
+            });
+        });
+        if close {
+            state.release_repository = None;
+        }
+        if confirm {
+            let service = Arc::clone(service);
+            let tx = tx.clone();
+            runtime.spawn(async move {
+                match service
+                    .publish_release(&repo_id, &tag, &name, &body, draft, prerelease, true)
+                    .await
+                {
+                    Ok(url) => {
+                        let _ = tx.send(UiEvent::Toast(format!("Release created: {url}")));
+                        let _ = tx.send(UiEvent::BootstrapRefreshed);
+                    }
+                    Err(error) => {
+                        let _ = tx.send(UiEvent::Error(error.user_message()));
+                    }
+                }
+            });
+            state.release_repository = None;
+        }
+    }
     if let Some(report) = &state.release_report {
         components::panel(tokens).show(ui, |ui| {
             ui.label(
@@ -275,6 +387,26 @@ pub fn activity(
                     ))
                     .size(10.0)
                     .color(tokens.warning),
+                );
+            }
+            if !report.migration_changes.is_empty() {
+                ui.label(
+                    RichText::new(format!(
+                        "{} migration/schema change(s) detected",
+                        report.migration_changes.len()
+                    ))
+                    .size(10.0)
+                    .color(tokens.warning),
+                );
+            }
+            if !report.dependency_changes.is_empty() {
+                ui.label(
+                    RichText::new(format!(
+                        "{} dependency-lock change(s) detected",
+                        report.dependency_changes.len()
+                    ))
+                    .size(10.0)
+                    .color(tokens.info),
                 );
             }
             if !report.draft_notes.is_empty() {

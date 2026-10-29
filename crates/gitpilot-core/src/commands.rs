@@ -159,9 +159,9 @@ impl CommandRunner {
         })?;
         let token = cancel.clone();
         let task = run_child(child, token);
-        let output = match tokio::time::timeout(std::time::Duration::from_secs(timeout), task).await
-        {
-            Ok(result) => result?,
+        let timed_out = tokio::time::timeout(std::time::Duration::from_secs(timeout), task).await;
+        let (timed_out, output) = match timed_out {
+            Ok(result) => (false, result?),
             Err(_) => {
                 return Err(GitPilotError::Git(format!(
                     "command timed out after {timeout} seconds"
@@ -176,7 +176,7 @@ impl CommandRunner {
             stdout: redact_secrets(&stdout),
             stderr: redact_secrets(&stderr),
             duration_ms: started.elapsed().as_millis() as i64,
-            timed_out: false,
+            timed_out,
             truncated: output.stdout.len() > MAX_OUTPUT_BYTES
                 || output.stderr.len() > MAX_OUTPUT_BYTES,
         })

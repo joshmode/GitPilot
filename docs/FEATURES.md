@@ -13,10 +13,10 @@ service implementation.
 | GitHub repository discovery | Implemented | REST `/user/repos`, pagination, account-scoped persistence |
 | GitHub PR/issue/release sync | Implemented | Full bounded pagination, ETag conditional requests, PR details/checks/reviews/files, merged/closed windows, milestones, releases |
 | GitHub commits sync | Implemented | Bounded default-branch history sync (up to 300 commits), parent/author/verification metadata and PR linkage; no full-history mirror |
-| GitHub reviews | Partial | Read comments/decisions with current-head review logic; publishing is deliberately deferred |
+| GitHub reviews | Implemented | Read comments/decisions with current-head logic; guarded human summary review and validated line comments |
 | Guarded GitHub write test | Implemented | Create-issue path requires write permission plus a typed confirmation; demo repositories cannot be mutated |
 | GitHub Projects v2 | Deferred | GraphQL/installation architecture documented; no Projects API implementation in this build |
-| Mandatory GitHub OAuth | Deferred | Fine-grained PAT + OS keychain implemented. OAuth PKCE and GitHub App callback are documented next steps |
+| GitHub OAuth | Implemented | Public-client device flow with explicit client ID; PAT and OS keychain remain supported. GitHub App private-key flow still requires a backend |
 | Multi-account storage | Implemented | Separate account IDs, hosts and keychain entries |
 | Dashboard | Implemented | Database-derived PR/review/CI/stale/issue metrics, saved snapshot, repository health, explicit missing-data states |
 | Project brief | Implemented | Deterministic, evidence-labelled brief; generated AI synthesis optional |
@@ -27,19 +27,19 @@ service implementation.
 | Contributor workspace | Implemented | Assignment/review workload and bottleneck signals; no individual productivity ranking |
 | Provider adapters | Implemented | Independent OpenAI Responses, Anthropic Messages, Gemini, OpenAI-compatible and Ollama protocols, plus mock |
 | Provider routing/budgets | Implemented | Persisted policies, cost estimates, fallback disclosure fields, usage ledger |
-| Model discovery | Partial | OpenAI/OpenAI-compatible/Ollama; Anthropic/Gemini discovery not implemented |
+| Model discovery | Implemented | OpenAI/OpenAI-compatible/Ollama discovery; Anthropic/Gemini use documented model entry because their endpoints do not share the same discovery contract |
 | AI code review | Implemented | Deterministic checks, optional structured AI review, confidence/evidence validation, dedupe, lifecycle, persisted runs, file exclusions and review-policy validation |
-| Review publishing | Partial | AI findings remain private. Guarded human comment/changes-requested/approval review submission exists behind explicit permission plus confirmation; the GUI does not expose it yet |
+| Review publishing | Implemented | Human comment/changes-requested/approval submission and line comments require explicit permission plus confirmation; AI findings stay private |
 | Knowledge memory | Implemented | FTS5 retrieval, provenance, explicit-fact flag, local documentation ingestion |
 | Vector/hybrid retrieval | Deferred | Embeddings optional by design; FTS5 is functional without external services |
 | NL investigation | Implemented | Local evidence answer or provider synthesis; empty retrieval is not negative evidence |
 | Automation engine | Implemented | Typed triggers/conditions/actions, dry run, idempotency, scoped + global permission gate, run history; scheduled execution still requires an external scheduler |
 | Webhook receiver | Deferred | Polling fallback and deployment architecture documented; desktop app does not pretend to receive public webhooks |
-| Local Git | Implemented | Connect working tree, status, branch list, tags, log, diff/compare and code search through argument-safe Git commands |
+| Local Git | Implemented | Connect working tree, status, branch list, tags, log, diff/compare, GitHub compare and indexed code search through argument-safe Git commands |
 | Safe execution | Partial | Structured command vectors, allow-list, timeout/cancellation, environment scrubbing, macOS `sandbox-exec` network denial; container/VM isolation is not bundled |
 | Search/palette | Implemented | FTS5 global search, command palette, recent items, saved-view storage API, keyboard reference |
-| Notifications | Implemented | In-app centre, read/snooze, dedupe keys; native OS notifications deferred |
-| Release workspace | Partial | Release history, evidence-backed readiness, blockers, dependency/breaking-change signals and draft notes; publishing is deliberately unavailable |
+| Notifications | Implemented | In-app centre, read/snooze, dedupe keys, quiet hours, per-repository policy; native OS notifications deferred |
+| Release workspace | Implemented | Release history, evidence-backed readiness, blockers, dependency/breaking-change/migration signals, draft notes and guarded draft/publish creation |
 | Security signals | Implemented | Code-scanning, Dependabot and secret-scanning ingestion with explicit not-checked/unavailable/no-alerts/findings states |
 | Audit log | Implemented | Mutations, review runs, automation runs, command execution, permission/provider changes; TSV export from Settings |
 | Backup/deletion | Implemented | SQLite `VACUUM INTO`, integrity check, explicit typed deletion confirmation |

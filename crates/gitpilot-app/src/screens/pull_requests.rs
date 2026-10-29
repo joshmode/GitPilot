@@ -135,6 +135,15 @@ pub fn show(
             }
         });
     });
+    if let Some(run) = state.review_run.as_ref()
+        && let Some(error) = &run.error
+    {
+        ui.label(
+            RichText::new(format!("Last review run error: {error}"))
+                .size(10.5)
+                .color(tokens.warning),
+        );
+    }
     ui.add_space(8.0);
     if !state.saved_pr_views.is_empty() {
         ui.horizontal_wrapped(|ui| {
@@ -317,6 +326,7 @@ fn detail_view(
     let mut back = false;
     let mut explain = false;
     let mut review = false;
+    let mut submit_review = false;
     let mut open_external = false;
     ui.horizontal(|ui| {
         if ui.button("← Back to pull requests").clicked() {
@@ -333,6 +343,11 @@ fn detail_view(
             }
             if ui.button("Run private review").clicked() {
                 review = true;
+            }
+            if ui.button("Submit review…").clicked() {
+                state.review_submit_event = "COMMENT".into();
+                state.review_submit_body.clear();
+                submit_review = true;
             }
             if ui.button("Explain this PR").clicked() {
                 explain = true;
@@ -388,7 +403,7 @@ fn detail_view(
     components::divider(ui, tokens);
     match state.pr_tab {
         DetailTab::Overview => overview_tab(ui, tokens, state, &detail),
-        DetailTab::Files => files_tab(ui, tokens, state, &detail),
+        DetailTab::Files => files_tab(ui, tokens, state, &detail, service, runtime, tx),
         DetailTab::Review => review_tab(ui, tokens, state, &detail, service, runtime, tx),
         DetailTab::Commits => commits_tab(ui, tokens, &detail),
         DetailTab::Checks => checks_tab(ui, tokens, &detail),
@@ -435,6 +450,131 @@ fn detail_view(
                 }
             }
         });
+    }
+    if let Some(path) = state.review_comment_path.clone()
+        && state.confirm_action.is_none()
+    {
+        let line = state.review_comment_line.unwrap_or_default();
+        components::centered_modal(ctx, tokens, 500.0, |ui| {
+            ui.label(
+                RichText::new("Publish line comment")
+                    .size(17.0)
+                    .strong()
+                    .color(tokens.text),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "Publish the prepared comment at {path}:{line}? This is an externally visible GitHub mutation and requires the publish-review permission.",
+                ))
+                .size(10.5)
+                .color(tokens.warning),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    state.review_comment_path = None;
+                }
+                if ui
+                    .add(egui::Button::new("Publish comment").fill(tokens.accent))
+                    .clicked()
+                {
+                    let service = Arc::clone(service);
+                    let tx = tx.clone();
+                    let pr_id = detail.pull_request.id.clone();
+                    let body = state.review_comment_body.clone();
+                    let path = path.clone();
+                    runtime.spawn(async move {
+                        match service
+                            .publish_review_comment(&pr_id, &path, line, "RIGHT", &body, true)
+                            .await
+                        {
+                            Ok(()) => {
+                                let _ = tx.send(UiEvent::Toast("Review comment published.".into()));
+                            }
+                            Err(error) => {
+                                let _ = tx.send(UiEvent::Error(error.user_message()));
+                            }
+                        }
+                    });
+                    state.review_comment_path = None;
+                }
+            });
+        });
+    }
+    if submit_review {
+        let mut event = state.review_submit_event.clone();
+        let mut body = state.review_submit_body.clone();
+        let mut confirm = false;
+        let mut close = false;
+        components::centered_modal(ctx, tokens, 520.0, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Submit GitHub review")
+                        .size(17.0)
+                        .strong()
+                        .color(tokens.text),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.label(
+                RichText::new(
+                    "This is an external mutation. It requires the publish-review permission and, for approval, the approve/merge permission. Branch protection is never bypassed.",
+                )
+                .size(10.5)
+                .color(tokens.warning),
+            );
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut event, "COMMENT".into(), "Comment");
+                ui.selectable_value(&mut event, "REQUEST_CHANGES".into(), "Request changes");
+                ui.selectable_value(&mut event, "APPROVE".into(), "Approve");
+            });
+            ui.add(
+                egui::TextEdit::multiline(&mut body)
+                    .desired_rows(6)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Review summary and evidence"),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Submit").clicked() {
+                    confirm = true;
+                }
+                ui.label(
+                    RichText::new(format!(
+                        "Policy: publish={} approve={}",
+                        state.bootstrap.permissions.publish_reviews,
+                        state.bootstrap.permissions.approve_or_merge
+                    ))
+                    .size(9.5)
+                    .color(tokens.text_faint),
+                );
+            });
+        });
+        let _ = close;
+        state.review_submit_body = body.clone();
+        state.review_submit_event = event.clone();
+        if confirm {
+            let id = pr.id.clone();
+            let service = Arc::clone(service);
+            let tx = tx.clone();
+            runtime.spawn(async move {
+                match service
+                    .submit_pull_request_review(&id, &event, &body, true)
+                    .await
+                {
+                    Ok(()) => {
+                        let _ = tx.send(UiEvent::Toast(
+                            "GitHub review submitted. Refresh to see the new decision.".into(),
+                        ));
+                    }
+                    Err(error) => {
+                        let _ = tx.send(UiEvent::Error(error.user_message()));
+                    }
+                }
+            });
+        }
     }
     let _ = ctx;
 }
@@ -545,6 +685,22 @@ fn overview_tab(
                             .color(tokens.text_faint),
                     );
                 }
+                if !explanation.file_notes.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("FILE-BY-FILE")
+                            .size(9.0)
+                            .strong()
+                            .color(tokens.text_faint),
+                    );
+                    for note in explanation.file_notes.iter().take(12) {
+                        ui.label(
+                            RichText::new(format!("{} · {}", note.path, note.summary))
+                                .size(10.0)
+                                .color(tokens.text_muted),
+                        );
+                    }
+                }
             });
         } else {
             components::empty_state(
@@ -555,6 +711,43 @@ fn overview_tab(
                 None,
             );
         }
+        right.add_space(8.0);
+        components::section_header(right, tokens, "Evidence links", None);
+        components::panel(tokens).show(right, |ui| {
+            let mut any = false;
+            if !detail.linked_issues.is_empty() {
+                any = true;
+                for issue in &detail.linked_issues {
+                    if ui
+                        .link(RichText::new(format!("#{} {}", issue.number, issue.title)).size(10.5))
+                        .clicked()
+                    {
+                        let _ = webbrowser::open(&issue.html_url);
+                    }
+                }
+            }
+            if !detail.related_prs.is_empty() {
+                any = true;
+                for related in &detail.related_prs {
+                    if ui
+                        .link(
+                            RichText::new(format!("#{} {}", related.number, related.title))
+                                .size(10.5),
+                        )
+                        .clicked()
+                    {
+                        let _ = webbrowser::open(&related.html_url);
+                    }
+                }
+            }
+            if !any {
+                ui.label(
+                    RichText::new("No linked issue or related PR was detected from cached metadata.")
+                        .size(10.0)
+                        .color(tokens.text_faint),
+                );
+            }
+        });
         right.add_space(8.0);
         components::section_header(right, tokens, "Merge readiness", None);
         components::panel(tokens).show(right, |ui| {
@@ -578,6 +771,9 @@ fn files_tab(
     tokens: &Tokens,
     state: &mut UiState,
     detail: &gitpilot_core::PrDetail,
+    service: &Arc<AppService>,
+    runtime: &tokio::runtime::Handle,
+    tx: &UnboundedSender<UiEvent>,
 ) {
     ui.horizontal(|ui| {
         ui.selectable_value(&mut state.diff_mode, DiffMode::Unified, "Unified");
@@ -684,6 +880,71 @@ fn files_tab(
                     file.deletions
                 )),
             );
+            if detail.pull_request.origin == gitpilot_core::DataOrigin::GitHub
+                && right.small_button("Inspect source").clicked()
+            {
+                let path = file.path.clone();
+                let repository_id = detail.pull_request.repository_id.clone();
+                let base_sha = detail.pull_request.base_sha.clone();
+                state.source_preview = Some((path.clone(), "Loading…".into()));
+                let service = Arc::clone(service);
+                let tx = tx.clone();
+                runtime.spawn(async move {
+                    match service
+                        .repository_file(&repository_id, &path, &base_sha)
+                        .await
+                    {
+                        Ok(content) => {
+                            let _ = tx.send(UiEvent::RepositoryFile(content));
+                        }
+                        Err(error) => {
+                            let _ = tx.send(UiEvent::Error(error.user_message()));
+                        }
+                    }
+                });
+            }
+            if let Some((path, line)) = right.ctx().memory(|memory| {
+                memory
+                    .data
+                    .get_temp::<(String, i64)>(egui::Id::new("review_comment_anchor"))
+            }) && path == file.path
+            {
+                right.label(
+                    RichText::new(format!("Comment anchor: {path}:{line}"))
+                        .monospace()
+                        .size(10.0)
+                        .color(tokens.info),
+                );
+                let mut body = state.review_comment_body.clone();
+                let response = right.add(
+                    egui::TextEdit::multiline(&mut body)
+                        .desired_rows(3)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Comment anchored to this validated diff line"),
+                );
+                state.review_comment_body = body;
+                if right.small_button("Publish line comment…").clicked() {
+                    state.review_comment_path = Some(path);
+                    state.review_comment_line = Some(line);
+                    state.confirm_action = Some("publish_line_comment".into());
+                }
+                let _ = response;
+            }
+            if let Some((preview_path, content)) = &state.source_preview
+                && preview_path == &file.path
+            {
+                egui::ScrollArea::both()
+                    .id_salt("source_preview")
+                    .max_height(140.0)
+                    .show(right, |ui| {
+                        ui.label(
+                            RichText::new(content)
+                                .monospace()
+                                .size(9.0)
+                                .color(tokens.text_muted),
+                        );
+                    });
+            }
             egui::ScrollArea::both()
                 .id_salt("diff_content")
                 .max_height(570.0)
@@ -775,15 +1036,25 @@ fn render_diff(ui: &mut egui::Ui, tokens: &Tokens, file: &DiffFile, mode: DiffMo
                     let height = galley.size().y.max(16.0);
                     let (rect, response) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width().max(500.0), height),
-                        egui::Sense::hover(),
+                        egui::Sense::click(),
                     );
                     ui.painter().rect_filled(rect, 0.0, bg);
                     ui.painter()
                         .galley(rect.left_top() + egui::vec2(5.0, 1.0_f32), galley, color);
-                    response.on_hover_text(format!(
+                    let response = response.on_hover_text(format!(
                         "old line {:?} · new line {:?}",
                         line.old_line, line.new_line
                     ));
+                    if response.clicked()
+                        && let Some(new_line) = line.new_line
+                    {
+                        ui.ctx().memory_mut(|memory| {
+                            memory.data.insert_temp(
+                                egui::Id::new("review_comment_anchor"),
+                                (file.path.clone(), new_line),
+                            );
+                        });
+                    }
                 }
             }
         });
@@ -803,6 +1074,17 @@ fn review_tab(
     runtime: &tokio::runtime::Handle,
     tx: &UnboundedSender<UiEvent>,
 ) {
+    if state.review_history.is_empty()
+        && let Some(pr_id) = state.selected_pr.clone()
+    {
+        let service = Arc::clone(service);
+        let tx = tx.clone();
+        runtime.spawn(async move {
+            if let Ok(runs) = service.store.review_runs(&pr_id).await {
+                let _ = tx.send(UiEvent::ReviewHistory(runs));
+            }
+        });
+    }
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(format!("{} findings", detail.findings.len()))
@@ -816,7 +1098,11 @@ fn review_tab(
                 .color(tokens.text_faint),
         );
     });
-    if let Some(run) = &state.review_run {
+    if let Some(run) = state
+        .review_run
+        .as_ref()
+        .or(detail.latest_review_run.as_ref())
+    {
         components::panel(tokens).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 components::badge(ui, tokens, &format!("{:?}", run.status), tokens.info);
@@ -845,6 +1131,26 @@ fn review_tab(
             }
         });
         ui.add_space(6.0);
+    }
+    if state.review_history.len() > 1 {
+        ui.collapsing("Review history", |ui| {
+            for run in state.review_history.iter().take(12) {
+                ui.horizontal(|ui| {
+                    components::badge(ui, tokens, &format!("{:?}", run.status), tokens.info);
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {} findings · {} / {}",
+                            run.started_at.format("%Y-%m-%d %H:%M"),
+                            run.deterministic_findings + run.ai_findings,
+                            run.provider.as_deref().unwrap_or("—"),
+                            run.model.as_deref().unwrap_or("—")
+                        ))
+                        .size(10.0)
+                        .color(tokens.text_muted),
+                    );
+                });
+            }
+        });
     }
     if detail.findings.is_empty() {
         components::empty_state(

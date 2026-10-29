@@ -219,6 +219,54 @@ pub fn show(
         });
         ui.add_space(6.0);
     }
+    if let Some(repo) = state.local_repos.first().cloned() {
+        components::panel(tokens).show(ui, |ui| {
+            ui.label(
+                RichText::new(format!("Search code in {}", repo.name))
+                    .size(12.0)
+                    .strong()
+                    .color(tokens.text),
+            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.local_search_query)
+                        .hint_text("function, type, error code")
+                        .desired_width(260.0),
+                );
+                if ui.button("Search").clicked() {
+                    let query = state.local_search_query.clone();
+                    let path = repo.path.clone();
+                    let service = Arc::clone(service);
+                    let tx = tx.clone();
+                    let cancel = CancellationToken::new();
+                    runtime.spawn(async move {
+                        match service.local_search(&path, &query, &cancel).await {
+                            Ok(results) => {
+                                let _ = tx.send(UiEvent::LocalSearch(results));
+                            }
+                            Err(error) => {
+                                let _ = tx.send(UiEvent::Error(error.user_message()));
+                            }
+                        }
+                    });
+                }
+            });
+            egui::ScrollArea::vertical()
+                .id_salt("local-search")
+                .max_height(160.0)
+                .show(ui, |ui| {
+                    for result in state.local_search_results.iter().take(80) {
+                        ui.label(
+                            RichText::new(result)
+                                .monospace()
+                                .size(9.5)
+                                .color(tokens.text_muted),
+                        );
+                    }
+                });
+        });
+        ui.add_space(6.0);
+    }
     if let Some(status) = &state.local_status {
         components::section_header(ui, tokens, "Working tree status", None);
         components::panel(tokens).show(ui, |ui| {

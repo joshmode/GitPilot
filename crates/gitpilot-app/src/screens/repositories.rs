@@ -241,7 +241,6 @@ pub fn show(
         } else {
             let service = Arc::clone(service);
             let tx = tx.clone();
-            let cancel = CancellationToken::new();
             let count = state
                 .bootstrap
                 .repositories
@@ -249,12 +248,10 @@ pub fn show(
                 .filter(|r| r.origin == gitpilot_core::DataOrigin::GitHub)
                 .count();
             runtime.spawn(async move {
-                match service.sync_all(&cancel).await {
-                    Ok(results) => {
+                match service.enqueue_sync().await {
+                    Ok(job_id) => {
                         let _ = tx.send(UiEvent::Toast(format!(
-                            "Synchronized {} repositories ({} attempted).",
-                            results.len(),
-                            count
+                            "Sync queued for {count} repositories ({job_id})."
                         )));
                         let _ = tx.send(UiEvent::BootstrapRefreshed);
                     }

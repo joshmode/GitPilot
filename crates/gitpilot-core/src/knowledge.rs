@@ -173,6 +173,147 @@ impl KnowledgeService {
                 }
             }
         }
+        let mut code_queue = vec![root.clone()];
+        let mut code_count = 0usize;
+        while let Some(dir) = code_queue.pop() {
+            if code_count >= MAX_CODE_FILES {
+                break;
+            }
+            let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+                continue;
+            };
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if code_count >= MAX_CODE_FILES {
+                    break;
+                }
+                let file_type = match entry.file_type().await {
+                    Ok(file_type) => file_type,
+                    Err(_) => continue,
+                };
+                let path = entry.path();
+                if file_type.is_symlink() || !crate::local_git::path_is_inside(&root, &path) {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                if file_type.is_dir() {
+                    if !matches!(
+                        name.as_str(),
+                        ".git"
+                            | "target"
+                            | "node_modules"
+                            | "vendor"
+                            | "generated"
+                            | "dist"
+                            | "build"
+                            | ".next"
+                            | "coverage"
+                    ) {
+                        code_queue.push(path);
+                    }
+                    continue;
+                }
+                let extension = path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if !matches!(
+                    extension.as_str(),
+                    "rs" | "ts"
+                        | "tsx"
+                        | "js"
+                        | "jsx"
+                        | "go"
+                        | "py"
+                        | "java"
+                        | "kt"
+                        | "rb"
+                        | "php"
+                        | "c"
+                        | "h"
+                        | "cc"
+                        | "cpp"
+                        | "hpp"
+                        | "cs"
+                        | "swift"
+                        | "sql"
+                        | "toml"
+                        | "yaml"
+                        | "yml"
+                ) {
+                    continue;
+                }
+                if let Ok(content) = bounded_read(&path).await {
+                    let relative = path
+                        .strip_prefix(&root)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .into_owned();
+                    self.store
+                        .save_knowledge(&KnowledgeRecord {
+                            id: Uuid::new_v4().to_string(),
+                            repository_id: Some(repository_id.into()),
+                            kind: "code".into(),
+                            title: relative.clone(),
+                            content,
+                            source_object: relative,
+                            source_version: Some("working-tree".into()),
+                            source_url: None,
+                            confidence: 0.8,
+                            extraction_method: "Bounded local source ingestion".into(),
+                            explicit_fact: true,
+                            superseded_by: None,
+                            extracted_at: Utc::now(),
+                            observed_at: Utc::now(),
+                        })
+                        .await?;
+                    ingested += 1;
+                    code_count += 1;
+                }
+            }
+        }
+        // Drive a repository-scoped code search index after bounded source
+        // ingestion. This is still local-only and does not execute code.
+        for symbol in [
+            "async",
+            "auth",
+            "database",
+            "error",
+            "migration",
+            "permission",
+            "security",
+            "test",
+        ] {
+            let hits = crate::local_git::LocalGit::search(
+                &root.to_string_lossy(),
+                symbol,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap_or_default();
+            if hits.is_empty() {
+                continue;
+            }
+            self.store
+                .save_knowledge(&KnowledgeRecord {
+                    id: Uuid::new_v4().to_string(),
+                    repository_id: Some(repository_id.into()),
+                    kind: "code_index".into(),
+                    title: format!("Symbol index · {symbol}"),
+                    content: hits.join("\n"),
+                    source_object: format!("git-grep:{symbol}"),
+                    source_version: Some("working-tree".into()),
+                    source_url: None,
+                    confidence: 0.9,
+                    extraction_method: "Bounded Git grep index".into(),
+                    explicit_fact: true,
+                    superseded_by: None,
+                    extracted_at: Utc::now(),
+                    observed_at: Utc::now(),
+                })
+                .await?;
+            ingested += 1;
+        }
         Ok(ingested)
     }
 
@@ -228,6 +369,7 @@ impl KnowledgeService {
                 review_focus: vec![],
                 uncertainties: vec!["No matching knowledge record was retrieved.".into()],
                 citations: vec![],
+                file_notes: vec![],
                 input_tokens: 0,
                 output_tokens: 0,
                 estimated_cost_usd: 0.0,
@@ -293,6 +435,7 @@ impl KnowledgeService {
                 "No negative conclusion is possible when a source is unavailable.".into(),
             ],
             citations,
+            file_notes: vec![],
             input_tokens: 0,
             output_tokens: 0,
             estimated_cost_usd: 0.0,

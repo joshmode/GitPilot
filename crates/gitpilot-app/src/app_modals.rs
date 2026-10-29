@@ -18,6 +18,65 @@ impl GitPilotApp {
             Modal::ReviewPolicy => self.review_policy_modal(ctx),
             Modal::ProviderSetup => self.provider_modal(ctx),
             Modal::ConfirmDelete => self.delete_modal(ctx),
+            Modal::ConfirmLineComment => self.line_comment_modal(ctx),
+        }
+    }
+
+    fn line_comment_modal(&mut self, ctx: &egui::Context) {
+        let mut close = false;
+        let mut submit = false;
+        let path = self.state.review_comment_path.clone().unwrap_or_default();
+        let line = self.state.review_comment_line.unwrap_or_default();
+        components::centered_modal(ctx, &self.tokens, 500.0, |ui| {
+            ui.label(
+                RichText::new("Publish line comment")
+                    .size(17.0)
+                    .strong()
+                    .color(self.tokens.text),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "This will post a public comment on GitHub at {path}:{line}. The anchor was validated against the parsed diff. This action requires the publish-review permission."
+                ))
+                .size(10.5)
+                .color(self.tokens.warning),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+                if ui
+                    .add(egui::Button::new("Publish comment").fill(self.tokens.accent))
+                    .clicked()
+                {
+                    submit = true;
+                }
+            });
+        });
+        if close {
+            self.modal = Modal::None;
+        }
+        if submit {
+            if let Some(pr_id) = self.state.selected_pr.clone() {
+                let body = self.state.review_comment_body.clone();
+                let service = Arc::clone(&self.service);
+                let tx = self.tx.clone();
+                self.runtime.spawn(async move {
+                    match service
+                        .publish_review_comment(&pr_id, &path, line, "RIGHT", &body, true)
+                        .await
+                    {
+                        Ok(()) => {
+                            let _ = tx.send(UiEvent::Toast("Review comment published.".into()));
+                            let _ = tx.send(UiEvent::BootstrapRefreshed);
+                        }
+                        Err(error) => {
+                            let _ = tx.send(UiEvent::Error(error.user_message()));
+                        }
+                    }
+                });
+            }
+            self.modal = Modal::None;
         }
     }
 
@@ -25,6 +84,7 @@ impl GitPilotApp {
         let mut close = false;
         let mut connect = false;
         let mut discover = None;
+        let mut start_device = false;
         components::centered_modal(ctx, &self.tokens, 520.0, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
@@ -107,6 +167,31 @@ impl GitPilotApp {
                         .color(self.tokens.text_faint),
                 );
             });
+            ui.add_space(8.0);
+            components::divider(ui, &self.tokens);
+            ui.label(
+                RichText::new("OAuth device flow")
+                    .size(11.0)
+                    .color(self.tokens.text_faint),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut self.state.github_client_id)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Public OAuth App client ID (optional)"),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Start device authorization").clicked() {
+                    start_device = true;
+                }
+                if !self.state.github_user_code.is_empty() {
+                    ui.label(
+                        RichText::new(format!("Code: {}", self.state.github_user_code))
+                            .monospace()
+                            .size(11.0)
+                            .color(self.tokens.warning),
+                    );
+                }
+            });
         });
         if close {
             self.modal = Modal::None;
@@ -118,6 +203,22 @@ impl GitPilotApp {
         }
         if let Some(account) = discover {
             self.discover(account);
+        }
+        if start_device {
+            let client_id = self.state.github_client_id.clone();
+            let host = self.state.github_host.clone();
+            let service = Arc::clone(&self.service);
+            let tx = self.tx.clone();
+            self.runtime.spawn(async move {
+                match service.start_github_device_flow(&client_id, &host).await {
+                    Ok(start) => {
+                        let _ = tx.send(UiEvent::DeviceFlow(Box::new(start)));
+                    }
+                    Err(error) => {
+                        let _ = tx.send(UiEvent::Error(error.user_message()));
+                    }
+                }
+            });
         }
     }
 
@@ -426,6 +527,7 @@ impl GitPilotApp {
         let mut close = false;
         let mut save = false;
         let mut test = false;
+        let mut discover = false;
         components::centered_modal(ctx, &self.tokens, 560.0, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
@@ -528,6 +630,18 @@ impl GitPilotApp {
                             }),
                     );
                 }
+                if !self.state.provider_models.is_empty() {
+                    ui.label(
+                        RichText::new("Discovered models")
+                            .size(10.0)
+                            .color(self.tokens.text_faint),
+                    );
+                    for model in self.state.provider_models.iter().take(12) {
+                        if ui.small_button(model).clicked() {
+                            self.state.provider_model_edit = model.clone();
+                        }
+                    }
+                }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Save provider").clicked() {
@@ -535,6 +649,9 @@ impl GitPilotApp {
                     }
                     if ui.button("Test connection").clicked() {
                         test = true;
+                    }
+                    if ui.button("Discover models").clicked() {
+                        discover = true;
                     }
                 });
             }
@@ -579,6 +696,20 @@ impl GitPilotApp {
                 match service.test_provider(&id).await {
                     Ok(()) => {
                         let _ = tx.send(UiEvent::Toast("Provider connection test passed.".into()));
+                    }
+                    Err(error) => {
+                        let _ = tx.send(UiEvent::Error(error.user_message()));
+                    }
+                }
+            });
+        }
+        if discover && let Some(id) = self.state.selected_provider.clone() {
+            let service = Arc::clone(&self.service);
+            let tx = self.tx.clone();
+            self.runtime.spawn(async move {
+                match service.discover_models(&id).await {
+                    Ok(models) => {
+                        let _ = tx.send(UiEvent::Models(models));
                     }
                     Err(error) => {
                         let _ = tx.send(UiEvent::Error(error.user_message()));

@@ -21,6 +21,7 @@ pub struct GitPilotApp {
     shutdown: CancellationToken,
     last_tick: Instant,
     last_sync_tick: Instant,
+    last_device_poll: Instant,
     sync_inflight: bool,
     started: Instant,
     pub(crate) modal: Modal,
@@ -39,6 +40,7 @@ pub enum Modal {
     ReviewPolicy,
     ProviderSetup,
     ConfirmDelete,
+    ConfirmLineComment,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +80,7 @@ impl GitPilotApp {
             shutdown: CancellationToken::new(),
             last_tick: Instant::now(),
             last_sync_tick: Instant::now(),
+            last_device_poll: Instant::now(),
             sync_inflight: false,
             started: Instant::now(),
             modal: Modal::None,
@@ -158,24 +161,13 @@ impl GitPilotApp {
             return;
         }
         self.sync_inflight = true;
-        {
-            let service = Arc::clone(&self.service);
-            let tx = self.tx.clone();
-            self.runtime.spawn(async move {
-                if let Err(error) = service.enqueue_sync().await {
-                    let _ = tx.send(UiEvent::Error(error.user_message()));
-                }
-            });
-        }
         let service = Arc::clone(&self.service);
         let tx = self.tx.clone();
-        let cancel = self.shutdown.child_token();
         self.runtime.spawn(async move {
-            match service.sync_all(&cancel).await {
-                Ok(results) => {
+            match service.enqueue_sync().await {
+                Ok(job_id) => {
                     let _ = tx.send(UiEvent::Toast(format!(
-                        "Background sync completed across {} repositories.",
-                        results.len()
+                        "Sync queued ({job_id}); it will run through the persisted job dispatcher."
                     )));
                     let _ = tx.send(UiEvent::BootstrapRefreshed);
                 }
@@ -270,6 +262,32 @@ impl GitPilotApp {
                 UiEvent::Jobs(jobs) => {
                     self.state.jobs = jobs;
                 }
+                UiEvent::Models(models) => {
+                    self.state.provider_models = models;
+                }
+                UiEvent::DeviceFlow(start) => {
+                    self.state.github_device_code = start.device_code.clone();
+                    self.state.github_user_code = start.user_code.clone();
+                    self.state.github_verification_uri = start.verification_uri.clone();
+                    let _ = webbrowser::open(&start.verification_uri);
+                    self.toast = Some((
+                        format!("Authorize GitPilot using code {}", start.user_code),
+                        false,
+                        Instant::now(),
+                    ));
+                }
+                UiEvent::DeviceFlowAuthorized(account) => {
+                    self.state.bootstrap.accounts.push(account.clone());
+                    self.state.github_device_code.clear();
+                    self.state.github_user_code.clear();
+                    self.modal = Modal::None;
+                    self.toast = Some((
+                        format!("Connected {}", account.login),
+                        false,
+                        Instant::now(),
+                    ));
+                    self.refresh();
+                }
                 UiEvent::SearchResults(hits) => {
                     self.state.recent_search = hits.clone();
                     let selected = self.palette.as_ref().map(|_| 0).unwrap_or(0);
@@ -282,8 +300,14 @@ impl GitPilotApp {
                     self.state.saved_pr_views = views;
                 }
                 UiEvent::PrDetail(detail) => {
+                    if let Some(run) = detail.latest_review_run.clone() {
+                        self.state.review_run = Some(run);
+                    }
                     self.state.pr_detail = Some(*detail);
                     self.state.busy = None;
+                }
+                UiEvent::ReviewHistory(runs) => {
+                    self.state.review_history = runs;
                 }
                 UiEvent::PrList { rows, total } => {
                     self.state.pr_rows = rows;
@@ -308,6 +332,10 @@ impl GitPilotApp {
                 }
                 UiEvent::CommitFiles(files) => {
                     self.state.commit_files = files;
+                    self.state.busy = None;
+                }
+                UiEvent::CommitDetail(commit) => {
+                    self.state.selected_commit_detail = Some(*commit);
                     self.state.busy = None;
                 }
                 UiEvent::Issues(issues) => {
@@ -345,6 +373,18 @@ impl GitPilotApp {
                 UiEvent::LocalBranches { path, branches } => {
                     self.state.local_branches = branches;
                     self.state.local_branches_repo = Some(path);
+                }
+                UiEvent::LocalSearch(results) => {
+                    self.state.local_search_results = results;
+                }
+                UiEvent::RepositoryFile(content) => {
+                    if let Some((_, value)) = &mut self.state.source_preview {
+                        *value = content;
+                    }
+                    self.state.busy = None;
+                }
+                UiEvent::CompareResult(result) => {
+                    self.state.compare_result = Some(result);
                 }
                 UiEvent::Audit(events) => {
                     self.state.audit = events;
@@ -661,6 +701,9 @@ impl eframe::App for GitPilotApp {
         } else if self.state.confirm_action.as_deref() == Some("delete_all") {
             self.state.confirm_action = None;
             self.modal = Modal::ConfirmDelete;
+        } else if self.state.confirm_action.as_deref() == Some("publish_line_comment") {
+            self.state.confirm_action = None;
+            self.modal = Modal::ConfirmLineComment;
         }
         self.handle_events(ctx);
         self.keyboard_shortcuts(ctx);
@@ -690,6 +733,36 @@ impl eframe::App for GitPilotApp {
             && when.elapsed() > Duration::from_secs(5)
         {
             self.toast = None;
+        }
+        if !self.state.github_device_code.is_empty()
+            && self.last_device_poll.elapsed() > Duration::from_secs(5)
+        {
+            self.last_device_poll = Instant::now();
+            let service = Arc::clone(&self.service);
+            let tx = self.tx.clone();
+            let host = self.state.github_host.clone();
+            let device_code = self.state.github_device_code.clone();
+            self.runtime.spawn(async move {
+                match service.poll_github_device_flow(&host, &device_code).await {
+                    Ok(gitpilot_core::DeviceFlowPoll::Authorized(account)) => {
+                        let _ = tx.send(UiEvent::DeviceFlowAuthorized(account));
+                    }
+                    Ok(gitpilot_core::DeviceFlowPoll::Expired) => {
+                        let _ = tx.send(UiEvent::Error(
+                            "GitHub device authorization expired; start again.".into(),
+                        ));
+                    }
+                    Ok(gitpilot_core::DeviceFlowPoll::Denied) => {
+                        let _ = tx.send(UiEvent::Error(
+                            "GitHub device authorization was denied.".into(),
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        let _ = tx.send(UiEvent::Error(error.user_message()));
+                    }
+                }
+            });
         }
         let desired_theme = theme_for(&self.state.bootstrap.settings);
         if (desired_theme == Theme::Light) != !self.tokens.dark {
