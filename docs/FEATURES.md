@@ -8,7 +8,7 @@ service implementation.
 |---|---|---|
 | Native Rust/egui GUI | Implemented | `cargo run -p gitpilot-app`; 15 workspaces, dark/light tokens, resizable sidebar |
 | Demo mode | Implemented | Seeded account, 3 repositories, 6 PRs, issues, releases, checks, diffs, knowledge and notifications; every origin is labelled `Demo data` |
-| SQLite persistence | Implemented | WAL, foreign keys, versioned migrations v1→v3, FTS5, search source mirror, indexed list queries |
+| SQLite persistence | Implemented | WAL, foreign keys, versioned migrations v1→v4, FTS5, search source mirror, indexed list queries |
 | Background jobs | Implemented | Persisted queue, dedupe, recovery, retry, cancellation, bounded dispatcher and UI inspector; sync/review jobs dispatch through registered handlers |
 | GitHub repository discovery | Implemented | REST `/user/repos`, pagination, account-scoped persistence |
 | GitHub PR/issue/release sync | Implemented | Full bounded pagination, ETag conditional requests, PR details/checks/reviews/files, merged/closed windows, milestones, releases |
@@ -29,9 +29,9 @@ service implementation.
 | Provider routing/budgets | Implemented | Persisted policies, cost estimates, fallback disclosure fields, usage ledger |
 | Model discovery | Implemented | OpenAI/OpenAI-compatible `/v1/models`, Gemini model-list and Ollama `/api/tags`; Anthropic uses documented explicit model entry |
 | AI code review | Implemented | Deterministic checks, optional structured AI review, confidence/evidence validation, dedupe, lifecycle, persisted runs, file exclusions and review-policy validation |
-| Review publishing | Implemented | Human comment/changes-requested/approval submission and line comments require explicit permission plus confirmation; AI findings stay private |
+| Review publishing | Implemented | Human summary/line-comment publication and explicit multi-finding publication require separate permission plus confirmation; only validated anchors become line comments, dismissed findings are excluded, and no automatic AI publication occurs |
 | Knowledge memory | Implemented | FTS5 retrieval, provenance, explicit-fact flag, local documentation ingestion |
-| Vector/hybrid retrieval | Deferred | Embeddings optional by design; FTS5 is functional without external services |
+| Vector/hybrid retrieval | Implemented | Opt-in local vector storage and cosine ranking layered over FTS5; OpenAI/OpenAI-compatible/Gemini/Ollama embedding adapters, content-hash invalidation, provider permission gate and deterministic fixture test. FTS5 remains fully functional without embeddings |
 | NL investigation | Implemented | Local evidence answer or provider synthesis; empty retrieval is not negative evidence |
 | Automation engine | Implemented | Typed triggers/conditions/actions, validated GUI builder, dry run, approval gates, idempotency, run history, scheduled tick and webhook event ingestion; unattended scheduling can use an external scheduler |
 | Webhook receiver | Implemented | Separate `gitpilot-webhook` binary verifies HMAC-SHA256 over raw bytes, caps payloads, deduplicates delivery IDs, persists verified events and routes typed triggers; polling remains fallback and the desktop app opens no public listener |

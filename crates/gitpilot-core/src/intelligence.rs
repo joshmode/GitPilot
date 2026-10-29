@@ -90,16 +90,33 @@ pub async fn dashboard(store: &Store) -> Result<Dashboard> {
             (total > 0).then_some(closed as f64 / total as f64)
         };
         let open_prs = prs.len() as i64;
-        let health_score = if open_prs == 0 && repo_issues.is_empty() {
-            None
-        } else {
-            let penalty = (reviews * 5 + failing * 9 + stale * 4).min(80);
-            Some((100 - penalty).max(20))
-        };
         let security_state = store
             .repository_security_state(&repo.id)
             .await
             .unwrap_or(SecurityState::NotChecked);
+        let security_penalty = match security_state {
+            SecurityState::FindingsPresent => {
+                store
+                    .security_alerts(&repo.id)
+                    .await
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|alert| {
+                        matches!(alert.severity, Severity::High | Severity::Critical)
+                            && alert.state != "dismissed"
+                    })
+                    .count()
+                    .min(12) as i64
+                    * 4
+            }
+            _ => 0,
+        };
+        let health_score = if open_prs == 0 && repo_issues.is_empty() && security_penalty == 0 {
+            None
+        } else {
+            let penalty = (reviews * 5 + failing * 9 + stale * 4 + security_penalty).min(90);
+            Some((100 - penalty).max(10))
+        };
         health.push(RepositoryHealth {
             repository_id: repo.id.clone(),
             name: repo.full_name.clone(),
@@ -553,16 +570,31 @@ pub fn overlap_signals(
                 .cloned()
                 .collect();
             if !overlap.is_empty() {
+                let shared_symbols = left
+                    .labels
+                    .iter()
+                    .filter(|label| right.labels.contains(label))
+                    .cloned()
+                    .collect::<Vec<_>>();
                 signals.push(FindingSignal {
-                    kind: "file_overlap".into(),
+                    kind: if shared_symbols.is_empty() {
+                        "file_overlap".into()
+                    } else {
+                        "file_and_label_overlap".into()
+                    },
                     pull_request_ids: vec![left.id.clone(), right.id.clone()],
                     confidence: (overlap.len() as f64 / 5.0).min(0.95),
                     title: format!(
-                        "#{} and #{} touch {} shared file{}",
+                        "#{} and #{} touch {} shared file{}{}",
                         left.number,
                         right.number,
                         overlap.len(),
-                        if overlap.len() == 1 { "" } else { "s" }
+                        if overlap.len() == 1 { "" } else { "s" },
+                        if shared_symbols.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" and share labels: {}", shared_symbols.join(", "))
+                        }
                     ),
                     evidence: overlap.into_iter().take(12).collect(),
                     is_conflict: false,

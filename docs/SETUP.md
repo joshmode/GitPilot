@@ -66,6 +66,13 @@ explanation flows deterministic without external transfer.
 External AI is denied by default. Enable it in **Settings → Privacy &
 permissions** only after deciding which repository evidence may leave the host.
 
+### Optional hybrid retrieval
+
+Configure a provider embedding model and select it in **AI workspace**. Enable
+"Use hybrid retrieval", approve external embedding transfer if the provider is
+remote, and run "Index knowledge embeddings". FTS5 remains available and no
+vector index is required for normal search.
+
 ## Local Git
 
 Open **Local workspace**, paste an absolute Git working-tree path and connect.

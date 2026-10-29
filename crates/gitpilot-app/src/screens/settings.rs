@@ -697,7 +697,7 @@ fn notifications(
         );
         ui.label(
             RichText::new(
-                "Individual analytics are intentionally unavailable. Contributor views show team-level assignments and review bottlenecks only.",
+                "Contributor views are team-level by default. Optional activity counters are context, never performance scores or rankings.",
             )
             .size(10.0)
             .color(tokens.text_muted),
@@ -749,6 +749,25 @@ fn notifications(
                     .suffix(" min"),
             );
         });
+        ui.horizontal(|ui| {
+            ui.label("Hybrid retrieval");
+            ui.checkbox(
+                &mut state.bootstrap.settings.embeddings_enabled,
+                "Enable optional embedding ranking",
+            );
+        ui.checkbox(
+            &mut state.bootstrap.settings.external_embeddings_approved,
+            "Approve sending indexed text to a configured external embedding provider",
+        );
+        });
+        ui.label(
+            RichText::new(format!(
+                "Knowledge index: {}",
+                state.embedding_status
+            ))
+            .size(10.0)
+            .color(tokens.text_faint),
+        );
         ui.label(
             RichText::new(
                 "Alerts are deduplicated by stable event key. Periodic sync uses this interval for connected live accounts. Native delivery is best-effort and requires a packaged app with OS permission; quiet hours suppress both in-app alert creation and delivery.",

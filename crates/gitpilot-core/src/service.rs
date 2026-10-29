@@ -169,6 +169,7 @@ impl AppService {
         {
             let mut router = router.write();
             router.register_mock(Arc::new(MockProvider::review_fixture()));
+            router.register_mock(Arc::new(MockProvider::embedding_fixture()));
         }
         if store.providers().await?.is_empty() {
             for mut config in ai::default_provider_configs() {
@@ -180,6 +181,22 @@ impl AppService {
                     || config.kind == "ollama";
                 store.save_provider(&config).await?;
             }
+            store
+                .save_provider(&ProviderConfig {
+                    id: "mock-embedding".into(),
+                    kind: "mock".into(),
+                    display_name: "Deterministic embedding fixture".into(),
+                    endpoint: "local://mock".into(),
+                    model: "mock-embedding-1".into(),
+                    enabled: true,
+                    has_credential: true,
+                    local_only: true,
+                    input_cost_per_million: Some(0.0),
+                    output_cost_per_million: Some(0.0),
+                    context_limit: 8192,
+                    embedding_model: Some("mock-embedding-1".into()),
+                })
+                .await?;
         }
         if let Ok(providers) = ai::load_http_providers(&store, credentials.as_ref()).await {
             let mut router = router.write();
@@ -970,6 +987,147 @@ impl AppService {
             .await
     }
 
+    pub async fn prepare_finding_publication(
+        &self,
+        pull_request_id: &str,
+        finding_ids: &[String],
+    ) -> Result<Vec<ReviewFindingPublication>> {
+        let permissions = self.store.load_permissions().await?;
+        permissions::require(&permissions, Permission::PublishReviews)?;
+        let pr = self.store.pull_request(pull_request_id).await?;
+        if pr.origin != DataOrigin::GitHub {
+            return Err(GitPilotError::Validation(
+                "demo pull requests cannot be published".into(),
+            ));
+        }
+        let findings = self.store.findings(pull_request_id).await?;
+        let files = self.store.pr_files(pull_request_id).await?;
+        let mut output = Vec::new();
+        for id in finding_ids.iter().take(50) {
+            let finding = findings
+                .iter()
+                .find(|finding| &finding.id == id)
+                .ok_or_else(|| GitPilotError::NotFound("review finding".into()))?;
+            if matches!(
+                finding.lifecycle,
+                FindingLifecycle::Dismissed | FindingLifecycle::FalsePositive
+            ) {
+                return Err(GitPilotError::Validation(
+                    "dismissed or false-positive findings cannot be published".into(),
+                ));
+            }
+            let anchor_valid = finding
+                .path
+                .as_deref()
+                .zip(finding.diff_line)
+                .is_some_and(|(path, line)| crate::diff::validate_anchor(&files, path, line));
+            let body = format!(
+                "**{}** — {} (`{}`, {} confidence)\n\n{}\n\nWhy it matters: {}\n\nSuggested remediation: {}\n\n_Generated from a GitPilot review run and published after human review. Verification: {}._",
+                finding.title,
+                finding.category,
+                finding.severity.label(),
+                (finding.confidence * 100.0).round() as i64,
+                finding.explanation,
+                finding.why_it_matters,
+                finding.suggested_remediation,
+                finding.verification_status
+            );
+            output.push(ReviewFindingPublication {
+                finding_id: finding.id.clone(),
+                finding: finding.clone(),
+                comment_body: body,
+                anchor_valid,
+            });
+        }
+        Ok(output)
+    }
+
+    /// Publish selected findings as one human-confirmed GitHub review.
+    /// Findings without a validated diff anchor are included only in the
+    /// summary body, never as invented line comments.
+    pub async fn publish_review_findings(
+        &self,
+        pull_request_id: &str,
+        finding_ids: &[String],
+        summary: &str,
+        event: &str,
+        confirmed: bool,
+    ) -> Result<()> {
+        if !confirmed {
+            return Err(GitPilotError::PermissionDenied(
+                "Publishing findings requires an explicit confirmation".into(),
+            ));
+        }
+        if summary.len() > 60_000 {
+            return Err(GitPilotError::Validation(
+                "review summary exceeds the accepted size".into(),
+            ));
+        }
+        let prepared = self
+            .prepare_finding_publication(pull_request_id, finding_ids)
+            .await?;
+        if prepared.is_empty() {
+            return Err(GitPilotError::Validation(
+                "select at least one finding to publish".into(),
+            ));
+        }
+        let pr = self.store.pull_request(pull_request_id).await?;
+        let repo = self.store.repository(&pr.repository_id).await?;
+        let mut comments = Vec::new();
+        let mut summary_sections = Vec::new();
+        for publication in &prepared {
+            if let (Some(path), Some(line), true) = (
+                publication.finding.path.as_deref(),
+                publication.finding.diff_line,
+                publication.anchor_valid,
+            ) {
+                comments.push(serde_json::json!({
+                    "path": path,
+                    "line": line,
+                    "side": "RIGHT",
+                    "body": publication.comment_body,
+                }));
+            } else {
+                summary_sections.push(publication.comment_body.clone());
+            }
+        }
+        let mut body = summary.trim().to_owned();
+        if !summary_sections.is_empty() {
+            if !body.is_empty() {
+                body.push_str("\n\n");
+            }
+            body.push_str("Findings without a validated diff anchor:\n\n");
+            body.push_str(&summary_sections.join("\n\n"));
+        }
+        self.git
+            .review_pull_request_with_comments(
+                &repo,
+                pr.number,
+                &pr.head_sha,
+                event,
+                &body,
+                &comments,
+            )
+            .await?;
+        self.store
+            .audit(&AuditEvent {
+                id: Uuid::new_v4().to_string(),
+                occurred_at: Utc::now(),
+                actor: "local-user".into(),
+                action: "github.review.findings_publish".into(),
+                target: pr.html_url.clone(),
+                outcome: "success".into(),
+                metadata: serde_json::json!({
+                    "event": event,
+                    "head_sha": pr.head_sha,
+                    "finding_ids": finding_ids,
+                    "anchored_comments": comments.len(),
+                    "summary_only_findings": summary_sections.len(),
+                }),
+            })
+            .await
+    }
+
     pub async fn commit_detail(&self, id: &str) -> Result<Commit> {
         self.store.commit(id).await
     }
@@ -1224,6 +1382,60 @@ impl AppService {
         Ok(intelligence::overlap_signals(&prs, &files))
     }
 
+    pub async fn change_impact_signals(&self) -> Result<Vec<ChangeImpactSignal>> {
+        let signals = self.overlap_signals().await?;
+        let prs = self
+            .store
+            .pull_requests(&PrFilter {
+                limit: 100,
+                ..Default::default()
+            })
+            .await?;
+        let mut output = signals
+            .into_iter()
+            .map(|signal| ChangeImpactSignal {
+                kind: signal.kind,
+                pull_request_ids: signal.pull_request_ids,
+                confidence: signal.confidence,
+                title: signal.title,
+                evidence: signal.evidence,
+                is_conflict: signal.is_conflict,
+            })
+            .collect::<Vec<_>>();
+        for pr in prs {
+            for path in self.store.pr_file_paths(&pr.id).await.unwrap_or_default() {
+                let lower = path.to_ascii_lowercase();
+                let kind = if lower.contains("migration") || lower.ends_with(".sql") {
+                    Some("migration_overlap")
+                } else if lower.contains("cargo.toml")
+                    || lower.ends_with("package.json")
+                    || lower.ends_with("go.mod")
+                    || lower.ends_with("go.sum")
+                {
+                    Some("dependency_overlap")
+                } else if lower.contains("openapi")
+                    || lower.contains("swagger")
+                    || lower.contains("schema")
+                {
+                    Some("api_schema_overlap")
+                } else {
+                    None
+                };
+                if let Some(kind) = kind {
+                    output.push(ChangeImpactSignal {
+                        kind: kind.into(),
+                        pull_request_ids: vec![pr.id.clone()],
+                        confidence: 0.6,
+                        title: format!("#{} touches a {kind} file", pr.number),
+                        evidence: vec![path],
+                        is_conflict: false,
+                    });
+                }
+            }
+        }
+        Ok(output)
+    }
+
     pub async fn search(&self, query: &str, repository_id: Option<&str>) -> Result<Vec<SearchHit>> {
         self.store.search(query, repository_id, 30).await
     }
@@ -1236,19 +1448,56 @@ impl AppService {
         cancel: &CancellationToken,
     ) -> Result<AiExplanation> {
         let repositories = self.store.repositories().await?;
-        let hits = self.knowledge.retrieve(query, repository_id).await?;
-        if !use_ai {
-            return Ok(KnowledgeService::answer_from_evidence(
-                query,
-                &hits,
-                &repositories,
-            ));
-        }
+        let settings = self.store.load_settings().await?;
         let permissions = self.store.load_permissions().await?;
+        let provider_config = if let Some(id) = settings.embedding_provider_id.as_deref() {
+            self.store
+                .providers()
+                .await?
+                .into_iter()
+                .find(|config| config.id == id)
+        } else {
+            None
+        };
+        let router = self.router.read().handle();
+        let hybrid = if settings.embeddings_enabled {
+            self.knowledge
+                .retrieve_hybrid(
+                    query,
+                    repository_id,
+                    &permissions,
+                    &router,
+                    provider_config.as_ref(),
+                    settings.hybrid_vector_weight,
+                )
+                .await?
+        } else {
+            crate::knowledge::HybridRetrieval {
+                hits: self.knowledge.retrieve(query, repository_id).await?,
+                vector_used: false,
+                embeddings_indexed: 0,
+                missing: vec!["Vector retrieval is disabled; using FTS5 only.".into()],
+            }
+        };
+        let hits = &hybrid.hits;
+        if !use_ai {
+            let mut answer = KnowledgeService::answer_from_evidence(query, hits, &repositories);
+            answer.technical = format!(
+                "{} {} indexed embedding(s). {}",
+                if hybrid.vector_used {
+                    "Hybrid FTS5 + vector retrieval."
+                } else {
+                    "FTS5 retrieval only."
+                },
+                hybrid.embeddings_indexed,
+                hybrid.missing.join(" ")
+            );
+            return Ok(answer);
+        }
         if hits.is_empty() {
             return Ok(KnowledgeService::answer_from_evidence(
                 query,
-                &hits,
+                hits,
                 &repositories,
             ));
         }
@@ -1275,7 +1524,6 @@ impl AppService {
             max_output_tokens: 1400,
             temperature: 0.2,
         };
-        let router = self.router.read().handle();
         let response = router
             .generate("workspace.ask", &request, &permissions, cancel)
             .await?;
@@ -1286,9 +1534,20 @@ impl AppService {
             one_sentence: format!("{} evidence record(s) informed this answer.", hits.len()),
             executive: response.text.clone(),
             developer: response.text,
-            technical: "Hybrid-free retrieval: repository-scoped FTS5 plus provenance metadata. No embeddings were used.".into(),
-            review_focus: hits.iter().take(5).map(|h| h.record.title.clone()).collect(),
-            uncertainties: vec!["Answer is limited to indexed records; unavailable data is not negative proof.".into()],
+            technical: if hybrid.vector_used {
+                "Hybrid retrieval: repository-scoped FTS5 plus optional embedding similarity with provenance metadata.".into()
+            } else {
+                "FTS5 retrieval: repository-scoped full-text search plus provenance metadata. No embeddings were used.".into()
+            },
+            review_focus: hits
+                .iter()
+                .take(5)
+                .map(|h| h.record.title.clone())
+                .collect(),
+            uncertainties: vec![
+                "Answer is limited to indexed records; unavailable data is not negative proof."
+                    .into(),
+            ],
             citations: hits
                 .iter()
                 .map(|hit| EvidenceRef {
@@ -1307,6 +1566,69 @@ impl AppService {
             output_tokens: response.output_tokens,
             estimated_cost_usd: response.estimated_cost_usd,
         })
+    }
+
+    pub async fn embedding_status(&self) -> Result<(bool, Option<String>, i64)> {
+        let settings = self.store.load_settings().await?;
+        Ok((
+            settings.embeddings_enabled,
+            settings.embedding_provider_id,
+            self.store.knowledge_embedding_count().await?,
+        ))
+    }
+
+    pub async fn index_knowledge_embeddings(
+        &self,
+        repository_id: Option<&str>,
+        provider_id: &str,
+        max_records: usize,
+    ) -> Result<usize> {
+        let provider = self
+            .store
+            .providers()
+            .await?
+            .into_iter()
+            .find(|provider| provider.id == provider_id)
+            .ok_or_else(|| GitPilotError::NotFound("embedding provider".into()))?;
+        if provider.embedding_model.is_none() {
+            return Err(GitPilotError::Validation(
+                "the selected provider has no embedding model".into(),
+            ));
+        }
+        let permissions = self.store.load_permissions().await?;
+        let router = self.router.read().handle();
+        let indexed = self
+            .knowledge
+            .index_embeddings(
+                repository_id,
+                &permissions,
+                &router,
+                &provider,
+                max_records.clamp(1, 512),
+            )
+            .await?;
+        let settings = self.store.load_settings().await?;
+        if settings.embedding_provider_id.as_deref() != Some(provider_id) {
+            let mut settings = settings;
+            settings.embedding_provider_id = Some(provider_id.into());
+            self.store.save_settings(&settings).await?;
+        }
+        self.store
+            .audit(&AuditEvent {
+                id: Uuid::new_v4().to_string(),
+                occurred_at: Utc::now(),
+                actor: "local-user".into(),
+                action: "knowledge.embed".into(),
+                target: provider_id.into(),
+                outcome: "success".into(),
+                metadata: serde_json::json!({
+                    "records_indexed": indexed,
+                    "repository_id": repository_id,
+                    "model": provider.embedding_model,
+                }),
+            })
+            .await?;
+        Ok(indexed)
     }
 
     pub async fn load_local_repositories(&self) -> Result<Vec<LocalRepository>> {
@@ -1522,6 +1844,22 @@ impl AppService {
         if !(0.7..=2.0).contains(&settings.font_scale) {
             return Err(GitPilotError::Validation(
                 "font scale must be between 0.7 and 2.0".into(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&settings.hybrid_vector_weight) {
+            return Err(GitPilotError::Validation(
+                "hybrid vector weight must be between 0 and 1".into(),
+            ));
+        }
+        if settings.embeddings_enabled
+            && !settings.external_embeddings_approved
+            && settings
+                .embedding_provider_id
+                .as_deref()
+                .is_some_and(|id| id != "mock-embedding" && id != "ollama-local")
+        {
+            return Err(GitPilotError::PermissionDenied(
+                "external embedding transfer requires explicit approval in Privacy settings".into(),
             ));
         }
         if !matches!(
@@ -2193,14 +2531,13 @@ impl AppService {
     pub async fn audit_review_publishing(&self, pr_id: &str, mode: PublishMode) -> Result<()> {
         let permissions = self.store.load_permissions().await?;
         // Private findings never cross the GitHub boundary. Draft and publish
-        // modes stay unavailable because the current GUI publishes only
-        // human-authored line comments and summaries. A future finding
-        // publication path must validate each anchor and require explicit
-        // confirmation; private AI findings are never published automatically.
+        // The generic automatic path remains unavailable; the explicit
+        // `publish_review_findings` path validates anchors and requires a
+        // human confirmation for each selected set.
         if mode != PublishMode::PrivateOnly {
             permissions::require(&permissions, Permission::PublishReviews)?;
             return Err(GitPilotError::Unsupported(
-                "Automated finding publication is intentionally unavailable. Findings remain private; publish a human-authored review summary or a validated line comment from the PR cockpit.".into(),
+                "Automatic publication is unavailable. Use the PR cockpit's explicit finding publication workflow.".into(),
             ));
         }
         self.store
@@ -2434,6 +2771,36 @@ impl AppService {
                 name: name.into(),
                 query: query.into(),
                 filters: Default::default(),
+                created_at: Utc::now(),
+            })
+            .await
+    }
+
+    pub async fn save_pr_view(
+        &self,
+        name: &str,
+        query: &str,
+        view: PrView,
+        repository_id: Option<&str>,
+    ) -> Result<()> {
+        let mut filters = BTreeMap::new();
+        filters.insert(
+            "view".into(),
+            serde_json::to_value(view)?
+                .as_str()
+                .unwrap_or("all")
+                .to_owned(),
+        );
+        if let Some(repository_id) = repository_id {
+            filters.insert("repository_id".into(), repository_id.into());
+        }
+        self.store
+            .save_view(&SavedView {
+                id: Uuid::new_v4().to_string(),
+                screen: "pull_requests".into(),
+                name: name.into(),
+                query: query.into(),
+                filters,
                 created_at: Utc::now(),
             })
             .await

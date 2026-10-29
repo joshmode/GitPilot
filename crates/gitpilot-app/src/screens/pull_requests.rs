@@ -120,10 +120,11 @@ pub fn show(
                     }
                 );
                 let query = state.pr_search.clone();
+                let view = state.pr_view;
                 let service = Arc::clone(service);
                 let tx = tx.clone();
                 runtime.spawn(async move {
-                    match service.save_view("pull_requests", &name, &query).await {
+                    match service.save_pr_view(&name, &query, view, None).await {
                         Ok(()) => {
                             let _ = tx.send(UiEvent::Toast(format!("Saved view “{name}”")));
                         }
@@ -156,6 +157,21 @@ pub fn show(
             for view in state.saved_pr_views.clone() {
                 if ui.small_button(&view.name).clicked() {
                     state.pr_search = view.query;
+                    if let Some(saved_view) =
+                        view.filters.get("view").map(|value| match value.as_str() {
+                            "mine" => PrView::Mine,
+                            "needs_review" => PrView::NeedsReview,
+                            "blocked" => PrView::Blocked,
+                            "ci_failing" => PrView::CiFailing,
+                            "ready" => PrView::Ready,
+                            "stale" => PrView::Stale,
+                            "recently_merged" => PrView::RecentlyMerged,
+                            "high_risk" => PrView::HighRisk,
+                            _ => PrView::All,
+                        })
+                    {
+                        state.pr_view = saved_view;
+                    }
                     load_list(state, service, runtime, tx);
                 }
             }
@@ -580,6 +596,70 @@ fn detail_view(
             });
         }
     }
+    if state.confirm_action.as_deref() == Some("publish_findings") {
+        let selected = state
+            .finding_publish_selection
+            .iter()
+            .filter(|(_, selected)| **selected)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        let mut confirm = false;
+        let mut close = false;
+        let event = state.finding_publish_event.clone();
+        let summary = state.finding_publish_summary.clone();
+        components::centered_modal(ctx, tokens, 560.0, |ui| {
+            ui.label(
+                RichText::new("Publish selected findings")
+                    .size(17.0)
+                    .strong()
+                    .color(tokens.text),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "This will submit a {} review with {} selected finding(s). Only findings whose file and line validate against the current diff become line comments; the rest are included in the summary. This requires the publish-review permission and is audited.",
+                    event, selected.len()
+                ))
+                .size(10.5)
+                .color(tokens.warning),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+                if ui
+                    .add(egui::Button::new("Publish review").fill(tokens.accent))
+                    .clicked()
+                {
+                    confirm = true;
+                }
+            });
+        });
+        if close {
+            state.confirm_action = None;
+        }
+        if confirm {
+            let pr_id = detail.pull_request.id.clone();
+            let service = Arc::clone(service);
+            let tx = tx.clone();
+            runtime.spawn(async move {
+                match service
+                    .publish_review_findings(&pr_id, &selected, &summary, &event, true)
+                    .await
+                {
+                    Ok(()) => {
+                        let _ = tx.send(UiEvent::Toast(
+                            "Selected findings were published after explicit confirmation.".into(),
+                        ));
+                        let _ = tx.send(UiEvent::BootstrapRefreshed);
+                    }
+                    Err(error) => {
+                        let _ = tx.send(UiEvent::Error(error.user_message()));
+                    }
+                }
+            });
+            state.confirm_action = None;
+        }
+    }
     let _ = ctx;
 }
 
@@ -865,6 +945,11 @@ fn files_tab(
         ui.selectable_value(&mut state.diff_mode, DiffMode::SideBySide, "Side by side");
         ui.checkbox(&mut state.diff_show_generated, "Show generated files");
         ui.checkbox(&mut state.diff_ignore_whitespace, "Whitespace changes");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.diff_search)
+                .hint_text("Search diff")
+                .desired_width(170.0),
+        );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(
                 RichText::new(format!("{} files cached", detail.files.len()))
@@ -1049,33 +1134,74 @@ fn files_tab(
                                 .color(tokens.warning),
                         );
                     } else {
-                        render_diff(ui, tokens, file, state.diff_mode);
+                        render_diff(ui, tokens, state, file, state.diff_mode);
                     }
                 });
         }
     });
 }
 
-fn render_diff(ui: &mut egui::Ui, tokens: &Tokens, file: &DiffFile, mode: DiffMode) {
+fn render_diff(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    state: &mut UiState,
+    file: &DiffFile,
+    mode: DiffMode,
+) {
+    let ignore_whitespace = state.diff_ignore_whitespace;
     egui::Frame::new()
         .fill(tokens.sidebar)
         .stroke(egui::Stroke::new(1.0_f32, tokens.border))
         .corner_radius(5.0)
         .show(ui, |ui| {
-            for hunk in &file.hunks {
+            let search = state.diff_search.to_ascii_lowercase();
+            for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+                if !search.is_empty()
+                    && !hunk
+                        .lines
+                        .iter()
+                        .any(|line| line.content.to_ascii_lowercase().contains(&search))
+                {
+                    continue;
+                }
+                let hunk_id = format!("{}:{hunk_index}", file.path);
+                let collapsed = state.diff_collapsed_hunks.contains(&hunk_id);
                 let (rect, _) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width().max(500.0), 20.0),
-                    egui::Sense::hover(),
+                    egui::Sense::click(),
                 );
                 ui.painter().rect_filled(rect, 0.0, tokens.raised);
                 ui.painter().text(
                     rect.left_center() + egui::vec2(8.0, 0.0),
                     egui::Align2::LEFT_CENTER,
-                    &hunk.header,
+                    format!("{} {}", if collapsed { "▸" } else { "▾" }, hunk.header),
                     egui::FontId::monospace(10.0),
                     tokens.info,
                 );
-                for line in &hunk.lines {
+                if rect.contains(ui.input(|input| input.pointer.hover_pos().unwrap_or_default()))
+                    && ui.input(|input| input.pointer.primary_clicked())
+                {
+                    if collapsed {
+                        state.diff_collapsed_hunks.remove(&hunk_id);
+                    } else {
+                        state.diff_collapsed_hunks.insert(hunk_id);
+                    }
+                }
+                if collapsed {
+                    continue;
+                }
+                let whitespace_only = if ignore_whitespace {
+                    whitespace_only_changed_lines(&hunk.lines)
+                } else {
+                    std::collections::BTreeSet::new()
+                };
+                for (line_index, line) in hunk.lines.iter().enumerate() {
+                    if whitespace_only.contains(&line_index) {
+                        continue;
+                    }
+                    if !search.is_empty() && !line.content.to_ascii_lowercase().contains(&search) {
+                        continue;
+                    }
                     let color = match line.kind {
                         DiffLineKind::Added => tokens.success,
                         DiffLineKind::Removed => tokens.danger,
@@ -1130,6 +1256,10 @@ fn render_diff(ui: &mut egui::Ui, tokens: &Tokens, file: &DiffFile, mode: DiffMo
                         "old line {:?} · new line {:?}",
                         line.old_line, line.new_line
                     ));
+                    if response.secondary_clicked() {
+                        ui.ctx()
+                            .copy_text(format!("{}:{}", file.path, line.new_line.unwrap_or(0)));
+                    }
                     if response.clicked()
                         && let Some(new_line) = line.new_line
                     {
@@ -1144,10 +1274,40 @@ fn render_diff(ui: &mut egui::Ui, tokens: &Tokens, file: &DiffFile, mode: DiffMo
             }
         });
     ui.label(
-        RichText::new("Line numbers are parsed from the actual unified diff. Comments are never anchored to invented positions.")
+        RichText::new(
+            "Line numbers and anchors come from the unified diff. Whitespace mode hides paired additions/removals whose only difference is whitespace; it never relocates an anchor."
+        )
             .size(9.5)
             .color(tokens.text_faint),
     );
+}
+
+/// Identify paired added/removed lines that are identical after whitespace
+/// normalization. This is a display-only filter; the original anchors remain
+/// authoritative and no position is synthesized.
+fn whitespace_only_changed_lines(
+    lines: &[gitpilot_core::DiffLine],
+) -> std::collections::BTreeSet<usize> {
+    let mut hidden = std::collections::BTreeSet::new();
+    let mut index = 0;
+    while index + 1 < lines.len() {
+        if lines[index].kind == DiffLineKind::Removed
+            && lines[index + 1].kind == DiffLineKind::Added
+            && normalize_diff_whitespace(&lines[index].content)
+                == normalize_diff_whitespace(&lines[index + 1].content)
+        {
+            hidden.insert(index);
+            hidden.insert(index + 1);
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    hidden
+}
+
+fn normalize_diff_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn review_tab(
@@ -1236,6 +1396,122 @@ fn review_tab(
                 });
             }
         });
+    }
+    if !detail.findings.is_empty() {
+        components::panel(tokens).show(ui, |ui| {
+            ui.label(
+                RichText::new("Publish selected findings")
+                    .size(12.5)
+                    .strong()
+                    .color(tokens.text),
+            );
+            ui.label(
+                RichText::new(
+                    "AI findings are private by default. Selection, summary and submission are explicit. Dismissed/false-positive findings are excluded; only validated anchors become line comments, and unanchored findings stay in the review summary.",
+                )
+                .size(10.0)
+                .color(tokens.warning),
+            );
+            ui.horizontal(|ui| {
+                ui.selectable_value(
+                    &mut state.finding_publish_event,
+                    "COMMENT".into(),
+                    "Comment",
+                );
+                ui.selectable_value(
+                    &mut state.finding_publish_event,
+                    "REQUEST_CHANGES".into(),
+                    "Request changes",
+                );
+            });
+            ui.add(
+                egui::TextEdit::multiline(&mut state.finding_publish_summary)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Human review summary (optional)"),
+            );
+            for finding in detail.findings.iter() {
+                let selected = state
+                    .finding_publish_selection
+                    .entry(finding.id.clone())
+                    .or_insert(false);
+                let excluded = matches!(
+                    finding.lifecycle,
+                    FindingLifecycle::Dismissed | FindingLifecycle::FalsePositive
+                );
+                ui.horizontal(|ui| {
+                    if excluded {
+                        components::badge(ui, tokens, "excluded by lifecycle", tokens.text_faint);
+                    } else {
+                        ui.checkbox(selected, &finding.title);
+                        components::severity_badge(ui, tokens, finding.severity);
+                        if finding.path.is_some() && finding.diff_line.is_some() {
+                            components::badge(ui, tokens, "anchored", tokens.success);
+                        } else {
+                            components::badge(ui, tokens, "summary only", tokens.warning);
+                        }
+                    }
+                });
+            }
+            if ui.button("Preview selection").clicked() {
+                let selected = state
+                    .finding_publish_selection
+                    .iter()
+                    .filter(|(_, selected)| **selected)
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>();
+                let pr_id = detail.pull_request.id.clone();
+                let service = Arc::clone(service);
+                let tx = tx.clone();
+                runtime.spawn(async move {
+                    match service
+                        .prepare_finding_publication(&pr_id, &selected)
+                        .await
+                    {
+                        Ok(rows) => {
+                            let _ = tx.send(UiEvent::FindingPublicationPreview(rows));
+                        }
+                        Err(error) => {
+                            let _ = tx.send(UiEvent::Error(error.user_message()));
+                        }
+                    }
+                });
+            }
+            if !state.finding_publish_preview.is_empty() {
+                ui.label(
+                    RichText::new(format!(
+                        "Preview: {} finding(s), {} with validated anchors",
+                        state.finding_publish_preview.len(),
+                        state
+                            .finding_publish_preview
+                            .iter()
+                            .filter(|row| row.anchor_valid)
+                            .count()
+                    ))
+                    .size(10.0)
+                    .color(tokens.info),
+                );
+                for row in state.finding_publish_preview.iter().take(5) {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {}",
+                            row.finding.title,
+                            if row.anchor_valid {
+                                "line comment"
+                            } else {
+                                "summary only"
+                            }
+                        ))
+                        .size(9.5)
+                        .color(tokens.text_muted),
+                    );
+                }
+                if ui.button("Publish selected findings…").clicked() {
+                    state.confirm_action = Some("publish_findings".into());
+                }
+            }
+        });
+        ui.add_space(8.0);
     }
     if detail.findings.is_empty() {
         components::empty_state(

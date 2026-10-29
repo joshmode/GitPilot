@@ -24,6 +24,153 @@ pub fn show(
             ui.checkbox(&mut state.ai_use_provider, "Use configured provider");
         },
     );
+    if state
+        .embedding_status
+        .starts_with("Embedding index not checked")
+    {
+        let service = Arc::clone(service);
+        let tx = tx.clone();
+        runtime.spawn(async move {
+            if let Ok((enabled, provider_id, count)) = service.embedding_status().await {
+                let _ = tx.send(UiEvent::EmbeddingStatus {
+                    enabled,
+                    provider_id,
+                    count,
+                });
+            }
+        });
+    }
+    components::panel(tokens).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Knowledge retrieval")
+                    .size(12.0)
+                    .strong()
+                    .color(tokens.text),
+            );
+            components::badge(ui, tokens, &state.embedding_status, tokens.info);
+            let eligible = state
+                .bootstrap
+                .providers
+                .iter()
+                .filter(|provider| provider.embedding_model.is_some())
+                .cloned()
+                .collect::<Vec<_>>();
+            if !eligible.is_empty() {
+                let selected = state
+                    .embedding_provider
+                    .clone()
+                    .or_else(|| eligible.first().map(|provider| provider.id.clone()))
+                    .unwrap_or_default();
+                egui::ComboBox::from_id_salt("embedding_provider")
+                    .selected_text(
+                        eligible
+                            .iter()
+                            .find(|provider| provider.id == selected)
+                            .map(|provider| provider.display_name.as_str())
+                            .unwrap_or("Embedding provider"),
+                    )
+                    .show_ui(ui, |ui| {
+                        for provider in &eligible {
+                            ui.selectable_value(
+                                &mut state.embedding_provider,
+                                Some(provider.id.clone()),
+                                &provider.display_name,
+                            );
+                        }
+                    });
+                ui.checkbox(
+                    &mut state.bootstrap.settings.embeddings_enabled,
+                    "Use hybrid retrieval",
+                );
+                ui.add(
+                    egui::Slider::new(
+                        &mut state.bootstrap.settings.hybrid_vector_weight,
+                        0.0..=1.0,
+                    )
+                    .text("vector weight"),
+                );
+                if state.bootstrap.settings.embedding_provider_id.is_none()
+                    || state.bootstrap.settings.embedding_provider_id.as_deref()
+                    != Some(selected.as_str())
+                {
+                    state.bootstrap.settings.embedding_provider_id = Some(selected.clone());
+                }
+                if ui
+                    .button("Save embedding policy")
+                    .on_hover_text("Vector search remains optional; FTS5 always works")
+                    .clicked()
+                {
+                    let settings = state.bootstrap.settings.clone();
+                    let service = Arc::clone(service);
+                    let tx = tx.clone();
+                    runtime.spawn(async move {
+                        match service.save_settings(&settings).await {
+                            Ok(()) => {
+                                let _ = tx.send(UiEvent::Toast(
+                                    "Embedding policy saved. Index records to enable vector ranking."
+                                        .into(),
+                                ));
+                            }
+                            Err(error) => {
+                                let _ = tx.send(UiEvent::Error(error.user_message()));
+                            }
+                        }
+                    });
+                }
+                if ui.button("Index knowledge embeddings").clicked() {
+                    let provider_id = selected;
+                    let repository_id = state.repository_scope.clone();
+                    let service = Arc::clone(service);
+                    let tx = tx.clone();
+                    runtime.spawn(async move {
+                        match service
+                            .index_knowledge_embeddings(
+                                repository_id.as_deref(),
+                                &provider_id,
+                                256,
+                            )
+                            .await
+                        {
+                            Ok(count) => {
+                                let _ = tx.send(UiEvent::Toast(format!(
+                                    "Indexed {count} knowledge embedding(s)."
+                                )));
+                                if let Ok((enabled, provider_id, count)) =
+                                    service.embedding_status().await
+                                {
+                                    let _ = tx.send(UiEvent::EmbeddingStatus {
+                                        enabled,
+                                        provider_id,
+                                        count,
+                                    });
+                                }
+                            }
+                            Err(error) => {
+                                let _ = tx.send(UiEvent::Error(error.user_message()));
+                            }
+                        }
+                    });
+                }
+            } else {
+                ui.label(
+                    RichText::new(
+                        "No provider has an embedding model configured. Add or edit a provider to enable optional hybrid retrieval.",
+                    )
+                    .size(10.0)
+                    .color(tokens.text_faint),
+                );
+            }
+        });
+        ui.label(
+            RichText::new(
+                "FTS5 remains the default and works without external services. Embeddings are opt-in, stored locally, invalidated when source content changes, and subject to the same external-AI/local-only policy.",
+            )
+            .size(10.0)
+            .color(tokens.text_muted),
+        );
+    });
+    ui.add_space(8.0);
     components::panel(tokens).show(ui, |ui| {
         ui.horizontal(|ui| {
             let response = ui.add(

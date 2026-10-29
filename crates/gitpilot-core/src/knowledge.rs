@@ -1,6 +1,9 @@
 //! Project memory with provenance. FTS retrieval is local-first; no embeddings
 //! are required and no repository content is sent externally during ingestion.
 
+use crate::ai::RouterHandle;
+use crate::domain::PermissionPolicy;
+use crate::domain::ProviderConfig;
 use crate::domain::{DataOrigin, Issue, KnowledgeRecord, PullRequest, Repository};
 use crate::error::{GitPilotError, Result};
 use crate::store::Store;
@@ -20,6 +23,14 @@ pub struct KnowledgeService {
 pub struct RetrievalHit {
     pub record: KnowledgeRecord,
     pub score: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HybridRetrieval {
+    pub hits: Vec<RetrievalHit>,
+    pub vector_used: bool,
+    pub embeddings_indexed: usize,
+    pub missing: Vec<String>,
 }
 
 impl KnowledgeService {
@@ -350,6 +361,167 @@ impl KnowledgeService {
         });
         results.truncate(10);
         Ok(results)
+    }
+
+    pub async fn retrieve_hybrid(
+        &self,
+        query: &str,
+        repository_id: Option<&str>,
+        permissions: &PermissionPolicy,
+        router: &RouterHandle,
+        provider: Option<&ProviderConfig>,
+        vector_weight: f64,
+    ) -> Result<HybridRetrieval> {
+        let mut lexical = self.retrieve(query, repository_id).await?;
+        let mut missing = Vec::new();
+        let Some(provider) = provider else {
+            return Ok(HybridRetrieval {
+                hits: lexical,
+                vector_used: false,
+                embeddings_indexed: 0,
+                missing: vec!["No embedding provider is configured; using FTS5 only.".into()],
+            });
+        };
+        let Some(model) = provider.embedding_model.as_deref() else {
+            return Ok(HybridRetrieval {
+                hits: lexical,
+                vector_used: false,
+                embeddings_indexed: 0,
+                missing: vec![format!(
+                    "{} does not have an embedding model configured; using FTS5 only.",
+                    provider.display_name
+                )],
+            });
+        };
+        let indexed = self
+            .store
+            .knowledge_embeddings(repository_id, &provider.id, model)
+            .await?;
+        if indexed.is_empty() {
+            return Ok(HybridRetrieval {
+                hits: lexical,
+                vector_used: false,
+                embeddings_indexed: 0,
+                missing: vec![
+                    "No embeddings are indexed for the selected provider/model; run semantic indexing first."
+                        .into(),
+                ],
+            });
+        }
+        let query_response = router
+            .embed(
+                &provider.id,
+                model,
+                &[query.chars().take(8_000).collect()],
+                permissions,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await?;
+        let Some(query_vector) = query_response.vectors.first() else {
+            missing.push("The embedding provider returned no query vector.".into());
+            return Ok(HybridRetrieval {
+                hits: lexical,
+                vector_used: false,
+                embeddings_indexed: indexed.len(),
+                missing,
+            });
+        };
+        let semantic = self
+            .store
+            .semantic_knowledge_search(query_vector, repository_id, &provider.id, model, 30)
+            .await?;
+        let mut combined =
+            std::collections::BTreeMap::<String, (KnowledgeRecord, f64, bool)>::new();
+        let vector_weight = vector_weight.clamp(0.0, 1.0);
+        for (index, hit) in lexical.drain(..).enumerate() {
+            combined.insert(
+                hit.record.id.clone(),
+                (hit.record, 1.0 - index as f64 * 0.01, false),
+            );
+        }
+        for (record, score) in semantic {
+            combined
+                .entry(record.id.clone())
+                .and_modify(|entry| {
+                    entry.1 = (entry.1 * (1.0 - vector_weight) + score * vector_weight)
+                        .max(entry.1 * 0.8 + score * vector_weight);
+                    entry.2 = true;
+                })
+                .or_insert((record, score * 0.8, true));
+        }
+        let mut hits = combined
+            .into_values()
+            .map(|(record, score, semantic)| RetrievalHit {
+                record,
+                score: if semantic { score + 0.05 } else { score },
+            })
+            .collect::<Vec<_>>();
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        hits.truncate(10);
+        Ok(HybridRetrieval {
+            hits,
+            vector_used: true,
+            embeddings_indexed: indexed.len(),
+            missing,
+        })
+    }
+
+    pub async fn index_embeddings(
+        &self,
+        repository_id: Option<&str>,
+        permissions: &PermissionPolicy,
+        router: &RouterHandle,
+        provider: &ProviderConfig,
+        max_records: usize,
+    ) -> Result<usize> {
+        let model = provider.embedding_model.as_deref().ok_or_else(|| {
+            GitPilotError::Validation("provider has no embedding model configured".into())
+        })?;
+        let records = self
+            .store
+            .knowledge_for_embedding(repository_id, &provider.id, model, max_records)
+            .await?;
+        let mut indexed = 0;
+        for chunk in records.chunks(16) {
+            let inputs = chunk
+                .iter()
+                .map(|record| {
+                    format!(
+                        "TITLE: {}\nKIND: {}\n{}\n",
+                        record.title,
+                        record.kind,
+                        record.content.chars().take(4_000).collect::<String>()
+                    )
+                })
+                .collect::<Vec<_>>();
+            let response = router
+                .embed(
+                    &provider.id,
+                    model,
+                    &inputs,
+                    permissions,
+                    &tokio_util::sync::CancellationToken::new(),
+                )
+                .await?;
+            if response.vectors.len() != chunk.len() {
+                return Err(GitPilotError::Provider(
+                    "embedding provider returned a partial batch".into(),
+                ));
+            }
+            for (record, vector) in chunk.iter().zip(response.vectors.iter()) {
+                let hash = crate::store::knowledge_content_hash(&record.title, &record.content);
+                self.store
+                    .save_knowledge_embedding(&record.id, &provider.id, model, vector, &hash)
+                    .await?;
+                indexed += 1;
+            }
+        }
+        Ok(indexed)
     }
 
     pub fn answer_from_evidence(

@@ -589,6 +589,8 @@ impl GitPilotApp {
                             self.state.selected_provider = Some(provider.id.clone());
                             self.state.provider_model_edit = provider.model.clone();
                             self.state.provider_endpoint_edit = provider.endpoint.clone();
+                            self.state.provider_embedding_model_edit =
+                                provider.embedding_model.clone().unwrap_or_default();
                         }
                     }
                 });
@@ -634,6 +636,22 @@ impl GitPilotApp {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.state.provider_endpoint_edit)
                         .desired_width(f32::INFINITY),
+                );
+                ui.label(
+                    RichText::new("Embedding model (optional)")
+                        .size(11.0)
+                        .color(self.tokens.text_faint),
+                );
+                if self.state.provider_embedding_model_edit.is_empty()
+                    && provider.embedding_model.is_some()
+                {
+                    self.state.provider_embedding_model_edit =
+                        provider.embedding_model.clone().unwrap_or_default();
+                }
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.state.provider_embedding_model_edit)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Used only for opt-in hybrid retrieval"),
                 );
                 if provider.kind != "ollama" {
                     ui.label(
@@ -696,6 +714,8 @@ impl GitPilotApp {
         {
             config.model = self.state.provider_model_edit.clone();
             config.endpoint = self.state.provider_endpoint_edit.clone();
+            config.embedding_model = (!self.state.provider_embedding_model_edit.trim().is_empty())
+                .then(|| self.state.provider_embedding_model_edit.trim().to_owned());
             let secret = std::mem::take(&mut self.state.provider_api_key);
             let service = Arc::clone(&self.service);
             let tx = self.tx.clone();

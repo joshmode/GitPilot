@@ -138,6 +138,13 @@ pub struct GenerationResponse {
     pub estimated_cost_usd: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct EmbeddingResponse {
+    pub model: String,
+    pub vectors: Vec<Vec<f32>>,
+    pub input_tokens: i64,
+}
+
 #[async_trait]
 pub trait ProviderAdapter: Send + Sync {
     fn id(&self) -> &str;
@@ -152,6 +159,16 @@ pub trait ProviderAdapter: Send + Sync {
     async fn discover_models(&self) -> Result<Vec<String>> {
         Err(GitPilotError::Unsupported(
             "model discovery is not supported by this adapter".into(),
+        ))
+    }
+    async fn embed(
+        &self,
+        _model: &str,
+        _inputs: &[String],
+        _cancel: &CancellationToken,
+    ) -> Result<EmbeddingResponse> {
+        Err(GitPilotError::Unsupported(
+            "embeddings are not supported by this provider".into(),
         ))
     }
 }
@@ -366,6 +383,148 @@ impl ProviderAdapter for HttpProvider {
             )),
         }
     }
+
+    async fn embed(
+        &self,
+        model: &str,
+        inputs: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<EmbeddingResponse> {
+        if inputs.is_empty() || inputs.len() > 64 || inputs.iter().any(|input| input.len() > 32_000)
+        {
+            return Err(GitPilotError::Validation(
+                "embedding batch must contain 1-64 inputs under 32 KB each".into(),
+            ));
+        }
+        let (url, body, auth) = match self.kind {
+            ProviderKind::OpenAi => (
+                format!("{}/v1/embeddings", self.endpoint),
+                json!({"model": model, "input": inputs}),
+                Some(self.secret()?.to_owned()),
+            ),
+            ProviderKind::OpenAiCompatible => (
+                format!("{}/v1/embeddings", self.endpoint),
+                json!({"model": model, "input": inputs}),
+                Some(self.secret()?.to_owned()),
+            ),
+            ProviderKind::Gemini => {
+                let parts = inputs
+                    .iter()
+                    .map(|input| json!({"model": format!("models/{model}"), "content": {"parts": [{"text": input}]}}))
+                    .collect::<Vec<_>>();
+                (
+                    format!(
+                        "{}/v1beta/models/{}:batchEmbedContents?key={}",
+                        self.endpoint,
+                        model,
+                        self.secret()?
+                    ),
+                    json!({"requests": parts}),
+                    None,
+                )
+            }
+            ProviderKind::Ollama => (
+                format!("{}/api/embed", self.endpoint),
+                json!({"model": model, "input": inputs}),
+                None,
+            ),
+            _ => {
+                return Err(GitPilotError::Unsupported(format!(
+                    "{} embeddings are not configured in this adapter",
+                    self.kind.label()
+                )));
+            }
+        };
+        let mut request = self.http.post(url).json(&body);
+        if let Some(secret) = auth {
+            request = request.bearer_auth(secret);
+        }
+        let response = send_with_cancel(request, cancel).await?;
+        let value = ensure_success(response, self.kind).await?;
+        let vectors = match self.kind {
+            ProviderKind::Ollama => value["embeddings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(parse_embedding_vector)
+                .collect::<Result<Vec<_>>>()?,
+            ProviderKind::Gemini => value["embeddings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|item| parse_embedding_vector(&item["values"]))
+                .collect::<Result<Vec<_>>>()?,
+            _ => value["data"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|item| parse_embedding_vector(&item["embedding"]))
+                .collect::<Result<Vec<_>>>()?,
+        };
+        if vectors.len() != inputs.len()
+            || vectors
+                .iter()
+                .any(|vector| vector.is_empty() || vector.iter().any(|v| !v.is_finite()))
+            || vectors
+                .windows(2)
+                .any(|pair| pair[0].len() != pair[1].len())
+        {
+            return Err(GitPilotError::Provider(
+                "embedding response has invalid vector dimensions".into(),
+            ));
+        }
+        Ok(EmbeddingResponse {
+            model: value["model"].as_str().unwrap_or(model).to_string(),
+            vectors,
+            input_tokens: value["usage"]["prompt_tokens"].as_i64().unwrap_or_else(|| {
+                value["usage"]["total_tokens"]
+                    .as_i64()
+                    .unwrap_or(inputs.iter().map(|input| input.len() as i64 / 4).sum())
+            }),
+        })
+    }
+}
+
+fn parse_embedding_vector(value: &Value) -> Result<Vec<f32>> {
+    value
+        .as_array()
+        .ok_or_else(|| GitPilotError::Provider("embedding vector is not an array".into()))?
+        .iter()
+        .map(|number| {
+            number.as_f64().map(|number| number as f32).ok_or_else(|| {
+                GitPilotError::Provider("embedding vector contains a non-number".into())
+            })
+        })
+        .collect()
+}
+
+/// Deterministic local embedding used by tests and offline demos. It is a
+/// hashed bag-of-words vector, not a semantic model and must never be presented
+/// as one.
+fn deterministic_embedding(text: &str) -> Vec<f32> {
+    const DIMENSIONS: usize = 64;
+    let mut vector = vec![0.0f32; DIMENSIONS];
+    for token in text.split_whitespace() {
+        let token = token
+            .chars()
+            .filter(|character| character.is_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if token.len() < 2 {
+            continue;
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&token, &mut hasher);
+        let index = (std::hash::Hasher::finish(&hasher) as usize) % DIMENSIONS;
+        vector[index] += 1.0;
+    }
+    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for value in &mut vector {
+            *value /= norm;
+        }
+    }
+    vector
 }
 
 impl HttpProvider {
@@ -660,6 +819,7 @@ pub struct MockProvider {
     id: String,
     model: String,
     response: Arc<dyn Fn(&GenerationRequest) -> String + Send + Sync>,
+    embeddings: bool,
 }
 
 impl MockProvider {
@@ -691,6 +851,7 @@ impl MockProvider {
                     "Synthetic provider response for deterministic tests.".into()
                 }
             }),
+            embeddings: false,
         }
     }
 
@@ -700,6 +861,17 @@ impl MockProvider {
             id: "mock-provider".into(),
             model: "mock-review-1".into(),
             response: Arc::new(|_| "not json".into()),
+            embeddings: false,
+        }
+    }
+
+    pub fn embedding_fixture() -> Self {
+        Self {
+            kind: ProviderKind::Mock,
+            id: "mock-embedding".into(),
+            model: "mock-embedding-1".into(),
+            response: Arc::new(|_| "Synthetic provider response for deterministic tests.".into()),
+            embeddings: true,
         }
     }
 }
@@ -743,6 +915,30 @@ impl ProviderAdapter for MockProvider {
     async fn health(&self) -> Result<()> {
         Ok(())
     }
+
+    async fn embed(
+        &self,
+        _model: &str,
+        inputs: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<EmbeddingResponse> {
+        if cancel.is_cancelled() {
+            return Err(GitPilotError::Cancelled);
+        }
+        if !self.embeddings {
+            return Err(GitPilotError::Unsupported(
+                "embedding fixture is not enabled".into(),
+            ));
+        }
+        Ok(EmbeddingResponse {
+            model: self.model.clone(),
+            vectors: inputs
+                .iter()
+                .map(|input| deterministic_embedding(input))
+                .collect(),
+            input_tokens: inputs.iter().map(|input| input.len() as i64 / 4).sum(),
+        })
+    }
 }
 
 pub struct Router {
@@ -758,6 +954,63 @@ pub struct RouterHandle {
     store: Store,
     providers: HashMap<String, Arc<dyn ProviderAdapter>>,
     configs: HashMap<String, ProviderConfig>,
+}
+
+impl RouterHandle {
+    pub async fn embed(
+        &self,
+        provider_id: &str,
+        model: &str,
+        inputs: &[String],
+        policy: &crate::domain::PermissionPolicy,
+        cancel: &CancellationToken,
+    ) -> Result<EmbeddingResponse> {
+        let Some(adapter) = self.providers.get(provider_id) else {
+            return Err(GitPilotError::Provider(format!(
+                "embedding provider `{provider_id}` is not registered"
+            )));
+        };
+        let Some(config) = self.configs.get(provider_id) else {
+            return Err(GitPilotError::Provider(format!(
+                "embedding provider `{provider_id}` has no configuration"
+            )));
+        };
+        if !config.enabled {
+            return Err(GitPilotError::Provider(format!(
+                "embedding provider `{provider_id}` is disabled"
+            )));
+        }
+        if !config.local_only {
+            crate::permissions::require(policy, crate::permissions::Permission::ExternalAi)?;
+        }
+        if policy.local_only && !config.local_only && config.kind != "ollama" {
+            return Err(GitPilotError::PermissionDenied(
+                "local-only mode rejected the embedding provider".into(),
+            ));
+        }
+        let started = Instant::now();
+        let response = adapter.embed(model, inputs, cancel).await?;
+        let input_tokens = response.input_tokens;
+        let estimated_cost =
+            (input_tokens as f64 * config.input_cost_per_million.unwrap_or(0.0)) / 1_000_000.0;
+        self.store
+            .record_usage(&ProviderUsage {
+                provider: config.kind.clone(),
+                model: response.model.clone(),
+                task: "knowledge.embed".into(),
+                input_tokens,
+                output_tokens: 0,
+                latency_ms: started.elapsed().as_millis() as i64,
+                retries: 0,
+                estimated_cost_usd: estimated_cost,
+                fallback_used: false,
+                cancelled: false,
+                succeeded: true,
+                created_at: Utc::now(),
+            })
+            .await?;
+        Ok(response)
+    }
 }
 
 impl Router {
@@ -798,6 +1051,7 @@ impl Router {
                 input_cost_per_million: Some(0.0),
                 output_cost_per_million: Some(0.0),
                 context_limit: 128000,
+                embedding_model: None,
             },
             adapter,
         );
@@ -1001,6 +1255,9 @@ pub async fn load_http_providers(
     let configs = store.providers().await?;
     let mut output = Vec::new();
     for mut config in configs {
+        if config.kind == "mock" {
+            continue;
+        }
         let secret = credentials
             .get(crate::credentials::CredentialKind::Provider, &config.id)
             .ok()
@@ -1030,6 +1287,7 @@ pub fn default_provider_configs() -> Vec<ProviderConfig> {
             input_cost_per_million: Some(0.25),
             output_cost_per_million: Some(2.0),
             context_limit: 400000,
+            embedding_model: Some("text-embedding-3-small".into()),
         },
         ProviderConfig {
             id: "anthropic-default".into(),
@@ -1043,6 +1301,7 @@ pub fn default_provider_configs() -> Vec<ProviderConfig> {
             input_cost_per_million: Some(3.0),
             output_cost_per_million: Some(15.0),
             context_limit: 200000,
+            embedding_model: None,
         },
         ProviderConfig {
             id: "gemini-default".into(),
@@ -1056,6 +1315,7 @@ pub fn default_provider_configs() -> Vec<ProviderConfig> {
             input_cost_per_million: Some(0.30),
             output_cost_per_million: Some(2.50),
             context_limit: 1000000,
+            embedding_model: Some("text-embedding-004".into()),
         },
         ProviderConfig {
             id: "ollama-local".into(),
@@ -1069,6 +1329,7 @@ pub fn default_provider_configs() -> Vec<ProviderConfig> {
             input_cost_per_million: Some(0.0),
             output_cost_per_million: Some(0.0),
             context_limit: 128000,
+            embedding_model: Some("nomic-embed-text".into()),
         },
     ]
 }
@@ -1121,6 +1382,7 @@ mod tests {
                 input_cost_per_million: None,
                 output_cost_per_million: None,
                 context_limit: 1000,
+                embedding_model: None,
             },
             secret: Some("secret".into()),
         };

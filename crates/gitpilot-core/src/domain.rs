@@ -383,6 +383,14 @@ pub struct ReviewerRecommendation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewFindingPublication {
+    pub finding_id: Id,
+    pub finding: ReviewFinding,
+    pub comment_body: String,
+    pub anchor_valid: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeownerRule {
     pub pattern: String,
     pub owners: Vec<String>,
@@ -450,6 +458,16 @@ pub struct WebhookEventRecord {
     pub received_at: DateTime<Utc>,
     pub processed_at: Option<DateTime<Utc>>,
     pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeImpactSignal {
+    pub kind: String,
+    pub pull_request_ids: Vec<Id>,
+    pub confidence: f64,
+    pub title: String,
+    pub evidence: Vec<String>,
+    pub is_conflict: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -732,6 +750,16 @@ pub struct KnowledgeRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeEmbedding {
+    pub provider_id: String,
+    pub model: String,
+    pub dimensions: i64,
+    pub vector: Vec<f32>,
+    pub content_hash: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Notification {
     pub id: Id,
     pub repository_id: Option<Id>,
@@ -759,6 +787,8 @@ pub struct ProviderConfig {
     pub input_cost_per_million: Option<f64>,
     pub output_cost_per_million: Option<f64>,
     pub context_limit: i64,
+    #[serde(default)]
+    pub embedding_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -983,6 +1013,14 @@ pub struct AppSettings {
     pub individual_analytics_enabled: bool,
     #[serde(default)]
     pub onboarding_complete: bool,
+    #[serde(default)]
+    pub embeddings_enabled: bool,
+    #[serde(default)]
+    pub embedding_provider_id: Option<String>,
+    #[serde(default = "default_embedding_weight")]
+    pub hybrid_vector_weight: f64,
+    #[serde(default)]
+    pub external_embeddings_approved: bool,
 }
 
 impl Default for AppSettings {
@@ -1007,10 +1045,18 @@ impl Default for AppSettings {
             allowed_executables: Vec::new(),
             individual_analytics_enabled: false,
             onboarding_complete: false,
+            embeddings_enabled: false,
+            embedding_provider_id: None,
+            hybrid_vector_weight: default_embedding_weight(),
+            external_embeddings_approved: false,
         }
     }
 }
 
 fn default_sandbox_backend() -> String {
     "host".into()
+}
+
+fn default_embedding_weight() -> f64 {
+    0.35
 }

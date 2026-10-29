@@ -45,6 +45,9 @@ Default policy:
   validation. Only HTTPS endpoints are accepted.
 - AI providers receive whatever evidence is included in the reviewed request.
   Users can inspect context before enabling transfer.
+- Optional embeddings can send indexed text to the selected provider. This is
+  separately opt-in, marked in settings, and disabled by default. Local Ollama
+  or the deterministic embedding fixture can be used without external transfer.
 - SQLite is built with SQLx's bundled SQLite (`libsqlite3-sys` bundled feature),
   so the app does not depend on a host `libsqlite3` version. FTS5 is available
   in the bundled build; verify the packaged binary on each target release.

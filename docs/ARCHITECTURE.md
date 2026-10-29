@@ -49,9 +49,10 @@ and recovery of interrupted work after restart. Long operations receive a
   checks, issues, releases and security alerts with predictable pagination.
   GraphQL is limited to the Projects v2 schema surface and kept behind a typed
   client boundary.
-- **FTS5 before vectors.** Full-text retrieval is local, deterministic, cheap and
-  works without embeddings. The schema reserves retrieval provenance and allows
-  a vector table/provider later.
+- **FTS5 by default, vectors optional.** Full-text retrieval is local,
+  deterministic, cheap and works without embeddings. Opt-in provider
+  embeddings are stored locally with content hashes and combined with FTS rank;
+  stale vectors are excluded.
 - **One rich SQLite schema.** JSON is limited to flexible metadata (raw labels,
   findings evidence and automation definitions). Core identity and relationships
   are relational with uniqueness constraints.

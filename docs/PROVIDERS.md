@@ -46,6 +46,19 @@ usage. The app never silently substitutes a weaker model without that metadata.
 Prices are user-configured estimates, not a live billing source. The UI labels
 cost as estimated.
 
+## Optional embeddings
+
+Hybrid retrieval is disabled by default. Configure an embedding model on a
+provider, enable it in **Settings → Notifications/Knowledge** or the AI
+workspace, and index a repository explicitly. OpenAI, OpenAI-compatible,
+Gemini and Ollama embedding protocols are supported per provider; Anthropic is
+not an embedding provider.
+
+Embeddings are stored locally as bounded vectors with a content hash. Changing
+a knowledge record invalidates its vector. FTS5 remains the default and no
+embedding provider is contacted unless the user enables the feature and grants
+the external-transfer policy for a remote provider.
+
 ## Usage ledger
 
 The `provider_usage` table records provider, model, task, input/output tokens,

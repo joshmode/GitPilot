@@ -11,6 +11,7 @@ use uuid::Uuid;
 const MIGRATION: &str = include_str!("../../../migrations/0001_init.sql");
 const MIGRATION_2: &str = include_str!("../../../migrations/0002_pr_commit_count.sql");
 const MIGRATION_3: &str = include_str!("../../../migrations/0003_projects_webhooks.sql");
+const MIGRATION_4: &str = include_str!("../../../migrations/0004_hybrid_retrieval.sql");
 
 #[derive(Clone)]
 pub struct Store {
@@ -45,6 +46,7 @@ impl Store {
             .connect_with(options)
             .await?;
         apply_migrations(&pool).await?;
+        backfill_knowledge_hashes(&pool).await?;
         Ok(Self { pool, path })
     }
 
@@ -57,6 +59,7 @@ impl Store {
             .connect_with(options)
             .await?;
         apply_migrations(&pool).await?;
+        backfill_knowledge_hashes(&pool).await?;
         Ok(Self {
             pool,
             path: PathBuf::from(":memory:"),
@@ -1413,16 +1416,27 @@ impl Store {
     }
 
     pub async fn save_knowledge(&self, record: &KnowledgeRecord) -> Result<()> {
+        let content_hash = knowledge_content_hash(&record.title, &record.content);
+        let existing_hash: Option<String> = sqlx::query_scalar(
+            "SELECT content_hash FROM knowledge_records WHERE repository_id IS ?
+             AND source_object = ? AND source_version IS ? AND kind = ?",
+        )
+        .bind(&record.repository_id)
+        .bind(&record.source_object)
+        .bind(&record.source_version)
+        .bind(&record.kind)
+        .fetch_optional(&self.pool)
+        .await?;
         sqlx::query(
             "INSERT INTO knowledge_records(id, repository_id, kind, title, content,
               source_object, source_version, source_url, confidence, extraction_method,
-              explicit_fact, superseded_by, extracted_at, observed_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              explicit_fact, superseded_by, extracted_at, observed_at, content_hash)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(repository_id, source_object, source_version, kind) DO UPDATE SET
                title=excluded.title, content=excluded.content, source_url=excluded.source_url,
                confidence=excluded.confidence, extraction_method=excluded.extraction_method,
                explicit_fact=excluded.explicit_fact, extracted_at=excluded.extracted_at,
-               observed_at=excluded.observed_at",
+               observed_at=excluded.observed_at, content_hash=excluded.content_hash",
         )
         .bind(&record.id)
         .bind(&record.repository_id)
@@ -1438,6 +1452,7 @@ impl Store {
         .bind(&record.superseded_by)
         .bind(record.extracted_at.to_rfc3339())
         .bind(record.observed_at.to_rfc3339())
+        .bind(&content_hash)
         .execute(&self.pool)
         .await?;
         let persisted_id: Option<String> = sqlx::query_scalar(
@@ -1451,6 +1466,14 @@ impl Store {
         .bind(&record.kind)
         .fetch_optional(&self.pool)
         .await?;
+        if existing_hash.as_deref() != Some(content_hash.as_str())
+            && let Some(id) = persisted_id.as_deref()
+        {
+            sqlx::query("DELETE FROM knowledge_embeddings WHERE record_id = ?")
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        }
         self.insert_search(
             "knowledge",
             persisted_id.as_deref().unwrap_or(&record.id),
@@ -1475,6 +1498,218 @@ impl Store {
                 .bind(limit as i64).fetch_all(&self.pool).await?
         };
         Ok(rows.into_iter().map(knowledge_from_row).collect())
+    }
+
+    pub async fn knowledge_by_id(&self, id: &str) -> Result<Option<KnowledgeRecord>> {
+        let row = sqlx::query("SELECT * FROM knowledge_records WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(knowledge_from_row))
+    }
+
+    pub async fn knowledge_for_embedding(
+        &self,
+        repository_id: Option<&str>,
+        provider_id: &str,
+        model: &str,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeRecord>> {
+        let rows = if let Some(repository_id) = repository_id {
+            sqlx::query(
+                "SELECT k.* FROM knowledge_records k
+                 WHERE k.repository_id = ? AND k.superseded_by IS NULL
+                   AND NOT EXISTS (
+                     SELECT 1 FROM knowledge_embeddings e
+                     WHERE e.record_id = k.id AND e.provider_id = ? AND e.model = ?
+                       AND e.content_hash = k.content_hash
+                   )
+                 ORDER BY k.observed_at DESC LIMIT ?",
+            )
+            .bind(repository_id)
+            .bind(provider_id)
+            .bind(model)
+            .bind(limit.clamp(1, 512) as i64)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT k.* FROM knowledge_records k
+                 WHERE k.superseded_by IS NULL
+                   AND NOT EXISTS (
+                     SELECT 1 FROM knowledge_embeddings e
+                     WHERE e.record_id = k.id AND e.provider_id = ? AND e.model = ?
+                       AND e.content_hash = k.content_hash
+                   )
+                 ORDER BY k.observed_at DESC LIMIT ?",
+            )
+            .bind(provider_id)
+            .bind(model)
+            .bind(limit.clamp(1, 512) as i64)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows.into_iter().map(knowledge_from_row).collect())
+    }
+
+    pub async fn save_knowledge_embedding(
+        &self,
+        record_id: &str,
+        provider_id: &str,
+        model: &str,
+        vector: &[f32],
+        content_hash: &str,
+    ) -> Result<()> {
+        if vector.is_empty() || vector.iter().any(|value| !value.is_finite()) {
+            return Err(GitPilotError::Validation(
+                "embedding vector is empty or non-finite".into(),
+            ));
+        }
+        let mut bytes = Vec::with_capacity(vector.len() * 4);
+        for value in vector {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        sqlx::query(
+            "INSERT INTO knowledge_embeddings(record_id, provider_id, model, dimensions,
+               vector, content_hash, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(record_id, provider_id, model) DO UPDATE SET
+               dimensions=excluded.dimensions, vector=excluded.vector,
+               content_hash=excluded.content_hash, created_at=excluded.created_at",
+        )
+        .bind(record_id)
+        .bind(provider_id)
+        .bind(model)
+        .bind(vector.len() as i64)
+        .bind(bytes)
+        .bind(content_hash)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn knowledge_embeddings(
+        &self,
+        repository_id: Option<&str>,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<Vec<(KnowledgeRecord, Vec<f32>)>> {
+        let rows = if let Some(repository_id) = repository_id {
+            sqlx::query(
+                "SELECT k.*, e.vector, e.dimensions, e.content_hash AS embedding_hash
+                 FROM knowledge_records k
+                 JOIN knowledge_embeddings e ON e.record_id = k.id
+                 WHERE k.repository_id = ? AND k.superseded_by IS NULL
+                   AND e.provider_id = ? AND e.model = ?
+                 LIMIT 2000",
+            )
+            .bind(repository_id)
+            .bind(provider_id)
+            .bind(model)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT k.*, e.vector, e.dimensions, e.content_hash AS embedding_hash
+                 FROM knowledge_records k
+                 JOIN knowledge_embeddings e ON e.record_id = k.id
+                 WHERE k.superseded_by IS NULL
+                   AND e.provider_id = ? AND e.model = ?
+                 LIMIT 2000",
+            )
+            .bind(provider_id)
+            .bind(model)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        let mut output = Vec::new();
+        for row in rows {
+            let content_hash: String = row.get("embedding_hash");
+            let id: String = row.get("id");
+            let repository_id: Option<String> = row.get("repository_id");
+            let kind: String = row.get("kind");
+            let title: String = row.get("title");
+            let content: String = row.get("content");
+            let source_object: String = row.get("source_object");
+            let source_version: Option<String> = row.get("source_version");
+            let source_url: Option<String> = row.get("source_url");
+            let confidence: f64 = row.get("confidence");
+            let extraction_method: String = row.get("extraction_method");
+            let explicit_fact: i64 = row.get("explicit_fact");
+            let superseded_by: Option<String> = row.get("superseded_by");
+            let extracted_at: String = row.get("extracted_at");
+            let observed_at: String = row.get("observed_at");
+            let record = KnowledgeRecord {
+                id,
+                repository_id,
+                kind,
+                title,
+                content,
+                source_object,
+                source_version,
+                source_url,
+                confidence,
+                extraction_method,
+                explicit_fact: explicit_fact != 0,
+                superseded_by,
+                extracted_at: parse_time(extracted_at),
+                observed_at: parse_time(observed_at),
+            };
+            if content_hash != knowledge_content_hash(&record.title, &record.content) {
+                continue;
+            }
+            let stored: Vec<u8> = row.get("vector");
+            let dimensions: i64 = row.get("dimensions");
+            if stored.len() != dimensions as usize * 4 {
+                continue;
+            }
+            let vector = stored
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| f32::from_le_bytes(*bytes))
+                .collect::<Vec<_>>();
+            output.push((record, vector));
+        }
+        Ok(output)
+    }
+
+    pub async fn knowledge_embedding_count(&self) -> Result<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_embeddings")
+                .fetch_one(&self.pool)
+                .await?,
+        )
+    }
+
+    pub async fn semantic_knowledge_search(
+        &self,
+        query_vector: &[f32],
+        repository_id: Option<&str>,
+        provider_id: &str,
+        model: &str,
+        limit: usize,
+    ) -> Result<Vec<(KnowledgeRecord, f64)>> {
+        let embeddings = self
+            .knowledge_embeddings(repository_id, provider_id, model)
+            .await?;
+        let mut results = embeddings
+            .into_iter()
+            .map(|(record, vector)| {
+                let similarity = cosine_similarity(query_vector, &vector);
+                (record, similarity)
+            })
+            .filter(|(_, similarity)| *similarity > 0.0)
+            .collect::<Vec<_>>();
+        results.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.truncate(limit.clamp(1, 100));
+        Ok(results)
     }
 
     pub async fn search(
@@ -1732,6 +1967,10 @@ impl Store {
                 input_cost_per_million: r.get("input_cost_per_million"),
                 output_cost_per_million: r.get("output_cost_per_million"),
                 context_limit: r.get("context_limit"),
+                embedding_model: r
+                    .try_get::<Option<String>, _>("embedding_model")
+                    .ok()
+                    .flatten(),
             })
             .collect())
     }
@@ -1739,13 +1978,15 @@ impl Store {
     pub async fn save_provider(&self, provider: &ProviderConfig) -> Result<()> {
         sqlx::query(
             "INSERT INTO provider_configs(id, kind, display_name, endpoint, model, enabled,
-              local_only, input_cost_per_million, output_cost_per_million, context_limit, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              local_only, input_cost_per_million, output_cost_per_million, context_limit,
+              embedding_model, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, display_name=excluded.display_name,
                endpoint=excluded.endpoint, model=excluded.model, enabled=excluded.enabled,
                local_only=excluded.local_only, input_cost_per_million=excluded.input_cost_per_million,
                output_cost_per_million=excluded.output_cost_per_million,
-               context_limit=excluded.context_limit",
+               context_limit=excluded.context_limit,
+               embedding_model=excluded.embedding_model",
         )
         .bind(&provider.id)
         .bind(&provider.kind)
@@ -1757,6 +1998,7 @@ impl Store {
         .bind(provider.input_cost_per_million)
         .bind(provider.output_cost_per_million)
         .bind(provider.context_limit)
+        .bind(&provider.embedding_model)
         .bind(Utc::now().to_rfc3339())
         .execute(&self.pool)
         .await?;
@@ -2123,6 +2365,7 @@ impl Store {
             "conversation_messages",
             "conversations",
             "knowledge_records",
+            "knowledge_embeddings",
             "review_findings",
             "review_runs",
             "review_comments",
@@ -2379,6 +2622,59 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
     if version.unwrap_or(0) < 3 {
         sqlx::query(MIGRATION_3).execute(pool).await?;
     }
+    let version: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_migrations")
+        .fetch_one(pool)
+        .await?;
+    if version.unwrap_or(0) < 4 {
+        let knowledge_hash_exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('knowledge_records')
+             WHERE name = 'content_hash'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if knowledge_hash_exists == 0 {
+            sqlx::query(
+                "ALTER TABLE knowledge_records
+                 ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
+            )
+            .execute(pool)
+            .await?;
+        }
+        let embedding_model_exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('provider_configs')
+             WHERE name = 'embedding_model'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if embedding_model_exists == 0 {
+            sqlx::query("ALTER TABLE provider_configs ADD COLUMN embedding_model TEXT")
+                .execute(pool)
+                .await?;
+        }
+        sqlx::query(MIGRATION_4).execute(pool).await?;
+    }
+    Ok(())
+}
+
+/// Existing knowledge rows predate `content_hash`. Backfill them once so
+/// embeddings are only trusted for the exact source content that produced them.
+async fn backfill_knowledge_hashes(pool: &SqlitePool) -> Result<()> {
+    let rows = sqlx::query(
+        "SELECT id, title, content FROM knowledge_records
+         WHERE content_hash = '' LIMIT 5000",
+    )
+    .fetch_all(pool)
+    .await?;
+    for row in rows {
+        let id: String = row.get("id");
+        let title: String = row.get("title");
+        let content: String = row.get("content");
+        sqlx::query("UPDATE knowledge_records SET content_hash = ? WHERE id = ?")
+            .bind(knowledge_content_hash(&title, &content))
+            .bind(id)
+            .execute(pool)
+            .await?;
+    }
     Ok(())
 }
 
@@ -2546,6 +2842,36 @@ fn parse_time(value: String) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(&value)
         .map(|v| v.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
+}
+
+/// Content hash used to invalidate embeddings when a knowledge source changes.
+pub fn knowledge_content_hash(title: &str, content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(title.as_bytes());
+    digest.update([0]);
+    digest.update(content.as_bytes());
+    hex::encode(digest.finalize())
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f64 {
+    if left.len() != right.len() || left.is_empty() {
+        return 0.0;
+    }
+    let mut dot = 0.0f64;
+    let mut left_norm = 0.0f64;
+    let mut right_norm = 0.0f64;
+    for (a, b) in left.iter().zip(right.iter()) {
+        let a = f64::from(*a);
+        let b = f64::from(*b);
+        dot += a * b;
+        left_norm += a * a;
+        right_norm += b * b;
+    }
+    if left_norm == 0.0 || right_norm == 0.0 {
+        return 0.0;
+    }
+    (dot / (left_norm.sqrt() * right_norm.sqrt())).clamp(-1.0, 1.0)
 }
 
 fn origin_str(origin: &DataOrigin) -> &'static str {

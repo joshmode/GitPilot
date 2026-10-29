@@ -274,6 +274,24 @@ impl GitPilotApp {
                 UiEvent::Models(models) => {
                     self.state.provider_models = models;
                 }
+                UiEvent::EmbeddingStatus {
+                    enabled,
+                    provider_id,
+                    count,
+                } => {
+                    self.state.embedding_provider = provider_id;
+                    self.state.embedding_status = if enabled {
+                        format!("hybrid retrieval enabled · {count} embeddings")
+                    } else {
+                        format!("FTS5 only · {count} embeddings cached")
+                    };
+                }
+                UiEvent::FindingPublicationPreview(rows) => {
+                    self.state.finding_publish_preview = rows;
+                }
+                UiEvent::ChangeImpactSignals(signals) => {
+                    self.state.change_impact_signals = signals;
+                }
                 UiEvent::DeviceFlow(start) => {
                     self.state.github_device_code = start.device_code.clone();
                     self.state.github_user_code = start.user_code.clone();
@@ -722,6 +740,9 @@ impl eframe::App for GitPilotApp {
         } else if self.state.confirm_action.as_deref() == Some("publish_line_comment") {
             self.state.confirm_action = None;
             self.modal = Modal::ConfirmLineComment;
+        } else if self.state.confirm_action.as_deref() == Some("publish_findings") {
+            // The PR cockpit renders this confirmation inline with its selected
+            // findings; do not route it into the generic line-comment modal.
         }
         self.handle_events(ctx);
         self.keyboard_shortcuts(ctx);

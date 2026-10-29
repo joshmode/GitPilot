@@ -10,7 +10,7 @@ a production-signed distribution.
 - Native Rust workspace with an egui desktop shell and 15 workspaces.
 - Real GitHub REST integration for repository discovery and bounded PR,
   issue, review, check, release and commit synchronization.
-- SQLite WAL persistence, FTS5 search, source mirror, migrations v1→v3, recovery,
+- SQLite WAL persistence, FTS5 search, source mirror, migrations v1→v4, recovery,
   backup and explicit local deletion.
 - Review engine with deterministic checks, optional structured AI findings,
   evidence and diff-anchor validation, deduplication and finding lifecycle.

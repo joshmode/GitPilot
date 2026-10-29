@@ -52,7 +52,7 @@ implemented and tested; `PARTIAL` is documented in FEATURES.md.
 - [x] Cross-PR file/symbol overlap signals
 - [x] Knowledge records with provenance and FTS retrieval
 - [x] Evidence-backed workspace Q&A
-- [ ] Vector/hybrid retrieval (deferred; FTS is functional)
+- [x] Vector/hybrid retrieval (opt-in; FTS remains the default)
 
 ## Milestone 7 — automation/local
 - [x] Workflow definitions, deterministic conditions/actions, dry run

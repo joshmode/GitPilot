@@ -88,7 +88,21 @@ async fn migration_upgrades_an_existing_v1_database() {
         .fetch_one(reopened.pool())
         .await
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
+    let hash_columns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('knowledge_records') WHERE name = 'content_hash'",
+    )
+    .fetch_one(reopened.pool())
+    .await
+    .unwrap();
+    assert_eq!(hash_columns, 1);
+    let embedding_columns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('provider_configs') WHERE name = 'embedding_model'",
+    )
+    .fetch_one(reopened.pool())
+    .await
+    .unwrap();
+    assert_eq!(embedding_columns, 1);
 }
 
 #[tokio::test]
@@ -223,6 +237,109 @@ async fn scheduled_automation_tick_is_permission_gated_and_idempotent() {
     service.save_automation(&automation).await.unwrap();
     assert_eq!(service.run_scheduled_automations().await.unwrap(), 1);
     assert_eq!(service.run_scheduled_automations().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn hybrid_retrieval_is_opt_in_and_embeddings_are_invalidated_on_content_change() {
+    let temp = TempDir::new().unwrap();
+    let service = demo_service(&temp).await;
+    let mut settings = service.store.load_settings().await.unwrap();
+    settings.embeddings_enabled = true;
+    settings.embedding_provider_id = Some("mock-embedding".into());
+    service.save_settings(&settings).await.unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let indexed = service
+        .index_knowledge_embeddings(Some("repo-0001"), "mock-embedding", 64)
+        .await
+        .unwrap();
+    assert!(indexed > 0);
+    assert!(service.store.knowledge_embedding_count().await.unwrap() > 0);
+    let answer = service
+        .ask_workspace(
+            "tenant authorization boundary",
+            Some("repo-0001"),
+            false,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(answer.technical.contains("embedding"));
+    let record = service
+        .store
+        .knowledge(Some("repo-0001"), 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.kind == "architecture")
+        .unwrap();
+    let mut changed = record;
+    changed
+        .content
+        .push_str("\nNew source content invalidates the old vector.");
+    service.store.save_knowledge(&changed).await.unwrap();
+    let pending = service
+        .store
+        .knowledge_for_embedding(Some("repo-0001"), "mock-embedding", "mock-embedding-1", 64)
+        .await
+        .unwrap();
+    assert!(pending.iter().any(|row| row.id == changed.id));
+}
+
+#[tokio::test]
+async fn finding_publication_requires_permission_and_explicit_confirmation() {
+    let temp = TempDir::new().unwrap();
+    let service = demo_service(&temp).await;
+    let _ = service
+        .run_review("pr-412", &tokio_util::sync::CancellationToken::new())
+        .await;
+    let pr = service.store.pull_request("pr-412").await.unwrap();
+    let finding = service
+        .store
+        .findings(&pr.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .next();
+    let ids = finding
+        .as_ref()
+        .map(|finding| vec![finding.id.clone()])
+        .unwrap_or_default();
+    let err = service
+        .publish_review_findings(&pr.id, &ids, "summary", "COMMENT", true)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        gitpilot_core::GitPilotError::PermissionDenied(_)
+    ));
+}
+
+#[tokio::test]
+async fn saved_pr_view_persists_its_view_filter() {
+    let temp = TempDir::new().unwrap();
+    let service = demo_service(&temp).await;
+    service
+        .save_pr_view(
+            "Blocked review queue",
+            "",
+            gitpilot_core::PrView::Blocked,
+            Some("repo-0001"),
+        )
+        .await
+        .unwrap();
+    let views = service.store.saved_views("pull_requests").await.unwrap();
+    let view = views
+        .iter()
+        .find(|view| view.name == "Blocked review queue")
+        .unwrap();
+    assert_eq!(
+        view.filters.get("view").map(String::as_str),
+        Some("blocked")
+    );
+    assert_eq!(
+        view.filters.get("repository_id").map(String::as_str),
+        Some("repo-0001")
+    );
 }
 
 #[tokio::test]

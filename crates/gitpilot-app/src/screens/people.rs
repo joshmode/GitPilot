@@ -28,6 +28,15 @@ pub fn show(
             }
         });
     }
+    if state.change_impact_signals.is_empty() {
+        let service = Arc::clone(service);
+        let tx = tx.clone();
+        runtime.spawn(async move {
+            if let Ok(signals) = service.change_impact_signals().await {
+                let _ = tx.send(UiEvent::ChangeImpactSignals(signals));
+            }
+        });
+    }
     components::page_header(
         ui,
         tokens,
@@ -123,6 +132,54 @@ pub fn show(
             }
         });
     ui.add_space(10.0);
+    components::section_header(
+        ui,
+        tokens,
+        "Cross-PR change signals",
+        Some("Deterministic overlap; never labelled a conflict without evidence"),
+    );
+    if state.change_impact_signals.is_empty() {
+        ui.label(
+            RichText::new(
+                "No shared-file, dependency, migration or API-schema signals were found in cached diffs.",
+            )
+            .size(10.5)
+            .color(tokens.text_faint),
+        );
+    }
+    for signal in state.change_impact_signals.iter().take(20) {
+        components::inset(tokens).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                components::badge(ui, tokens, &signal.kind, tokens.warning);
+                components::badge(
+                    ui,
+                    tokens,
+                    &format!("{:.0}% confidence", signal.confidence * 100.0),
+                    tokens.text_muted,
+                );
+                components::badge(
+                    ui,
+                    tokens,
+                    if signal.is_conflict {
+                        "conflict signal"
+                    } else {
+                        "review prompt"
+                    },
+                    tokens.info,
+                );
+                ui.label(RichText::new(&signal.title).size(11.0).color(tokens.text));
+            });
+            for evidence in signal.evidence.iter().take(5) {
+                ui.label(
+                    RichText::new(format!("· {evidence}"))
+                        .monospace()
+                        .size(9.5)
+                        .color(tokens.text_faint),
+                );
+            }
+        });
+        ui.add_space(4.0);
+    }
     components::section_header(
         ui,
         tokens,

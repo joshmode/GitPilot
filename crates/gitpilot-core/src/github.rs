@@ -1753,6 +1753,51 @@ impl GitHubService {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub async fn review_pull_request_with_comments(
+        &self,
+        repo: &Repository,
+        number: i64,
+        head_sha: &str,
+        event: &str,
+        body: &str,
+        comments: &[serde_json::Value],
+    ) -> Result<()> {
+        if !matches!(event, "COMMENT" | "REQUEST_CHANGES" | "APPROVE") {
+            return Err(GitPilotError::Validation("unsupported review event".into()));
+        }
+        if comments.len() > 50 {
+            return Err(GitPilotError::Validation(
+                "a review may contain at most 50 line comments".into(),
+            ));
+        }
+        let account = self
+            .store
+            .accounts()
+            .await?
+            .into_iter()
+            .find(|a| a.id == repo.account_id)
+            .ok_or_else(|| {
+                GitPilotError::AuthRequired("repository account is not connected".into())
+            })?;
+        let client = self.client_for(&account.id, &account.host)?;
+        let _: serde_json::Value = client
+            .post_json(
+                &format!(
+                    "/repos/{}/{}/pulls/{}/reviews",
+                    repo.owner, repo.name, number
+                ),
+                &serde_json::json!({
+                    "commit_id": head_sha,
+                    "event": event,
+                    "body": body,
+                    "comments": comments,
+                }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_review_comment(
         &self,
         repo: &Repository,
