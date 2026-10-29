@@ -20,7 +20,7 @@ service implementation.
 | Multi-account storage | Implemented | Separate account IDs, hosts and OS credential entries |
 | Dashboard | Implemented | Database-derived PR/review/CI/stale/issue metrics, saved snapshot, repository health, explicit missing-data states |
 | Project brief | Implemented | Deterministic, evidence-labelled brief; generated AI synthesis optional |
-| PR cockpit | Implemented | Views, search, pagination, metadata, checks, discussion, findings, readiness and explanation entry |
+| PR cockpit | Implemented | Views, search, pagination, metadata, checks, discussion, findings, readiness and selectable one-sentence/executive/developer/detailed/file-by-file explanations |
 | Diff viewer | Implemented | Unified/side-by-side, strict hunk parsing, real line anchors, binary and generated-file handling |
 | Commit explorer | Implemented | Persisted commits, metadata, PR linkage, diff-grounded explanations with uncertainty, review focus and on-demand GitHub commit-file diff viewer |
 | Cross-PR overlap | Implemented | Deterministic shared-file signals; intentionally not labelled as a conflict |

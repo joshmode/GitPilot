@@ -98,7 +98,13 @@ impl Store {
         let Some(raw) = self.get_setting("app_settings").await? else {
             return Ok(AppSettings::default());
         };
-        Ok(serde_json::from_str(&raw).unwrap_or_default())
+        match serde_json::from_str(&raw) {
+            Ok(settings) => Ok(settings),
+            Err(error) => {
+                tracing::warn!(%error, "stored settings are invalid; using safe defaults");
+                Ok(AppSettings::default())
+            }
+        }
     }
 
     pub async fn save_settings(&self, settings: &AppSettings) -> Result<()> {
@@ -118,7 +124,13 @@ impl Store {
         let Some(raw) = self.get_setting("permissions").await? else {
             return Ok(PermissionPolicy::default());
         };
-        Ok(serde_json::from_str(&raw).unwrap_or_default())
+        match serde_json::from_str(&raw) {
+            Ok(policy) => Ok(policy),
+            Err(error) => {
+                tracing::warn!(%error, "stored permissions are invalid; using deny-by-default policy");
+                Ok(PermissionPolicy::default())
+            }
+        }
     }
 
     pub async fn save_permissions(&self, policy: &PermissionPolicy) -> Result<()> {

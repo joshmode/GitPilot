@@ -10,7 +10,7 @@ cargo check --workspace --offline
 
 cargo test --workspace --offline
   -> 39 core unit tests passed
-  -> 33 service/database integration tests passed (current suite)
+  -> 34 service/database integration tests passed (current suite)
   -> webhook binary and app unit targets compiled and ran
   -> 0 app unit tests (GUI smoke tested separately)
 
@@ -58,7 +58,7 @@ The review pass also added regression coverage for:
 - automatic private-review execution once per PR head
 - persisted job dispatcher startup and runtime initialization
 
-Latest workspace test totals: **39 unit tests + 33 integration tests**, all
+Latest workspace test totals: **39 unit tests + 34 integration tests**, all
 passing. Strict Clippy and `cargo fmt --check` also pass.
 
 Final release-binary smoke test also initialized schema migration version 4,
@@ -69,7 +69,7 @@ Post-audit additions include a live job dispatcher, migration v1→v2 coverage,
 security-alert ingestion, release reports, commit diff retrieval, guarded
 GitHub write/review boundaries, Projects v2, webhook verification, native
 notification fallback and source-link navigation fixes. The latest workspace
-run is **39 unit + 33 integration tests**, all passing, with fmt
+run is **39 unit + 34 integration tests**, all passing, with fmt
 and strict Clippy clean.
 
 ## Not executed

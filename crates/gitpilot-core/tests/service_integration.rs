@@ -805,6 +805,30 @@ async fn external_ai_requires_permission_and_local_only_blocks_it() {
 }
 
 #[tokio::test]
+async fn explanation_depth_changes_the_requested_output_budget() {
+    let temp = TempDir::new().unwrap();
+    let service = demo_service(&temp).await;
+    let mut policy = service.store.load_permissions().await.unwrap();
+    policy.external_ai = true;
+    service.save_permissions(&policy).await.unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let short = service
+        .explain_pr_at_depth(
+            "pr-412",
+            gitpilot_core::ExplanationDepth::OneSentence,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let detailed = service
+        .explain_pr_at_depth("pr-412", gitpilot_core::ExplanationDepth::Detailed, &cancel)
+        .await
+        .unwrap();
+    assert!(!short.one_sentence.trim().is_empty());
+    assert!(!detailed.executive.trim().is_empty());
+}
+
+#[tokio::test]
 async fn data_deletion_clears_database_records() {
     let temp = TempDir::new().unwrap();
     let service = demo_service(&temp).await;

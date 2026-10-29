@@ -612,6 +612,28 @@ pub struct AiExplanation {
     pub estimated_cost_usd: f64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExplanationDepth {
+    OneSentence,
+    Executive,
+    Developer,
+    Detailed,
+    FileByFile,
+}
+
+impl ExplanationDepth {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OneSentence => "One sentence",
+            Self::Executive => "Executive",
+            Self::Developer => "Developer",
+            Self::Detailed => "Detailed",
+            Self::FileByFile => "File by file",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileExplanation {
     pub path: String,

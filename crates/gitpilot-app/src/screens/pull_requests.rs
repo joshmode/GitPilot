@@ -358,6 +358,19 @@ fn detail_view(
                 .color(tokens.text_faint),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            egui::ComboBox::from_id_salt("explanation_depth")
+                .selected_text(state.explanation_depth.label())
+                .show_ui(ui, |ui| {
+                    for depth in [
+                        gitpilot_core::ExplanationDepth::OneSentence,
+                        gitpilot_core::ExplanationDepth::Executive,
+                        gitpilot_core::ExplanationDepth::Developer,
+                        gitpilot_core::ExplanationDepth::Detailed,
+                        gitpilot_core::ExplanationDepth::FileByFile,
+                    ] {
+                        ui.selectable_value(&mut state.explanation_depth, depth, depth.label());
+                    }
+                });
             if ui.button("Open on GitHub").clicked() {
                 open_external = true;
             }
@@ -440,11 +453,12 @@ fn detail_view(
     }
     if explain {
         let id = pr.id.clone();
+        let depth = state.explanation_depth;
         let service = Arc::clone(service);
         let tx = tx.clone();
         let cancel = CancellationToken::new();
         runtime.spawn(async move {
-            match service.explain_pr(&id, &cancel).await {
+            match service.explain_pr_at_depth(&id, depth, &cancel).await {
                 Ok(explanation) => {
                     let _ = tx.send(UiEvent::Explanation(explanation));
                 }
@@ -749,7 +763,14 @@ fn overview_tab(
                         .size(10.0)
                         .color(tokens.text_faint),
                     );
+                    components::badge(ui, tokens, state.explanation_depth.label(), tokens.info);
                 });
+                ui.label(
+                    RichText::new(&explanation.one_sentence)
+                        .size(13.0)
+                        .strong()
+                        .color(tokens.text),
+                );
                 ui.label(
                     RichText::new(&explanation.executive)
                         .size(11.5)
