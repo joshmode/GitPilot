@@ -1,0 +1,258 @@
+use crate::nav::Screen;
+use gitpilot_core::{
+    Account, AiExplanation, Automation, AutomationRun, Bootstrap, Commit, Contributor, Issue,
+    LocalRepository, LocalStatus, Notification, PrDetail, PrView, ProjectBrief, PullRequest,
+    Repository, ReviewPolicy, ReviewRun, SearchHit,
+};
+
+#[derive(Debug, Clone)]
+pub enum BusyState {
+    Loading(String),
+}
+
+impl BusyState {
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Loading(label) => label,
+        }
+    }
+}
+
+pub enum UiEvent {
+    Bootstrap(Box<Bootstrap>),
+    Error(String),
+    Connected(Account),
+    RepositoriesDiscovered(Vec<Repository>),
+    SearchResults(Vec<SearchHit>),
+    SavedViews(Vec<gitpilot_core::SavedView>),
+    PrDetail(Box<PrDetail>),
+    PrList { rows: Vec<PullRequest>, total: i64 },
+    Explanation(AiExplanation),
+    Brief(ProjectBrief),
+    Contributors(Vec<Contributor>),
+    Commits(Vec<Commit>),
+    CommitFiles(Vec<gitpilot_core::DiffFile>),
+    Issues(Vec<Issue>),
+    Automations(Vec<Automation>),
+    AutomationRuns(Vec<AutomationRun>),
+    Health(Vec<(String, String)>),
+    LocalRepos(Vec<LocalRepository>),
+    Milestones(Vec<(String, gitpilot_core::MilestoneSnapshot)>),
+    SecurityAlerts(Vec<gitpilot_core::SecurityAlert>),
+    ReleaseReport(Box<gitpilot_core::ReleaseReport>),
+    LocalStatus(LocalStatus),
+    LocalBranches { path: String, branches: Vec<String> },
+    Audit(Vec<gitpilot_core::AuditEvent>),
+    Usage((i64, i64, f64)),
+    Toast(String),
+    CommandOutput(String),
+    BootstrapRefreshed,
+    Jobs(Vec<gitpilot_core::JobRecord>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsTab {
+    Appearance,
+    GitHub,
+    Providers,
+    Routing,
+    Review,
+    Privacy,
+    Notifications,
+    Sandbox,
+    Data,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffMode {
+    Unified,
+    SideBySide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailTab {
+    Overview,
+    Files,
+    Review,
+    Commits,
+    Checks,
+    Discussion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnboardingStep {
+    Welcome,
+    GitHub,
+    Repositories,
+    Ai,
+    Privacy,
+    Review,
+    Notifications,
+    Finish,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandPreset {
+    Test,
+    Clippy,
+    FmtCheck,
+}
+
+pub struct UiState {
+    pub bootstrap: Bootstrap,
+    pub screen: Screen,
+    pub busy: Option<BusyState>,
+    pub syncing: bool,
+    pub error: Option<String>,
+    pub sidebar_collapsed: bool,
+    pub global_search: String,
+    pub repository_scope: Option<String>,
+    pub selected_pr: Option<String>,
+    pub selected_commit: Option<String>,
+    pub commit_files: Vec<gitpilot_core::DiffFile>,
+    pub pr_detail: Option<PrDetail>,
+    pub pr_view: PrView,
+    pub pr_page: usize,
+    pub pr_search: String,
+    pub pr_rows: Vec<PullRequest>,
+    pub recent_search: Vec<SearchHit>,
+    pub saved_pr_views: Vec<gitpilot_core::SavedView>,
+    pub pr_total: i64,
+    pub pr_loading: bool,
+    pub diff_mode: DiffMode,
+    pub diff_file: Option<String>,
+    pub diff_show_generated: bool,
+    pub diff_ignore_whitespace: bool,
+    pub pr_tab: DetailTab,
+    pub explanation: Option<AiExplanation>,
+    pub review_run: Option<ReviewRun>,
+    pub brief: Option<ProjectBrief>,
+    pub contributors: Vec<Contributor>,
+    pub commits: Vec<Commit>,
+    pub commit_search: String,
+    pub commit_compare_left: String,
+    pub commit_compare_right: String,
+    pub issues: Vec<Issue>,
+    pub issue_open_only: bool,
+    pub notifications: Vec<Notification>,
+    pub jobs: Vec<gitpilot_core::JobRecord>,
+    pub automations: Vec<Automation>,
+    pub automation_runs: Vec<AutomationRun>,
+    pub health: Vec<(String, String)>,
+    pub local_repos: Vec<LocalRepository>,
+    pub local_command_output: Option<String>,
+    pub local_branches: Vec<String>,
+    pub local_branches_repo: Option<String>,
+    pub milestones: Vec<(String, gitpilot_core::MilestoneSnapshot)>,
+    pub security_alerts: Vec<gitpilot_core::SecurityAlert>,
+    pub release_report: Option<gitpilot_core::ReleaseReport>,
+    pub local_status: Option<LocalStatus>,
+    pub local_path: String,
+    pub audit: Vec<gitpilot_core::AuditEvent>,
+    pub settings_tab: SettingsTab,
+    pub onboarding_step: OnboardingStep,
+    pub onboarding_complete: bool,
+    pub show_shortcuts: bool,
+    pub github_host: String,
+    pub github_token: String,
+    pub provider_api_key: String,
+    pub provider_model_edit: String,
+    pub provider_endpoint_edit: String,
+    pub selected_provider: Option<String>,
+    pub routing_drafts: Vec<gitpilot_core::RoutingPolicy>,
+    pub review_policy_draft: ReviewPolicy,
+    pub ai_question: String,
+    pub ai_answer: Option<AiExplanation>,
+    pub ai_use_provider: bool,
+    pub issue_title: String,
+    pub issue_body: String,
+    pub issue_repository: Option<String>,
+    pub issue_labels: String,
+    pub confirmed_delete: String,
+    pub confirm_action: Option<String>,
+    pub account_menu: bool,
+    pub palette_hint: String,
+}
+
+impl UiState {
+    pub fn from_bootstrap(bootstrap: Bootstrap) -> Self {
+        let pr_view = PrView::All;
+        let notifications = bootstrap.notifications.clone();
+        let routing_drafts = bootstrap.routing.clone();
+        Self {
+            bootstrap,
+            screen: Screen::Overview,
+            busy: None,
+            syncing: false,
+            error: None,
+            sidebar_collapsed: false,
+            global_search: String::new(),
+            repository_scope: None,
+            selected_pr: None,
+            selected_commit: None,
+            commit_files: vec![],
+            pr_detail: None,
+            pr_view,
+            pr_page: 0,
+            pr_search: String::new(),
+            pr_rows: vec![],
+            recent_search: vec![],
+            saved_pr_views: vec![],
+            pr_total: 0,
+            pr_loading: false,
+            diff_mode: DiffMode::Unified,
+            diff_file: None,
+            diff_show_generated: false,
+            diff_ignore_whitespace: false,
+            pr_tab: DetailTab::Overview,
+            explanation: None,
+            review_run: None,
+            brief: None,
+            contributors: vec![],
+            commits: vec![],
+            commit_search: String::new(),
+            commit_compare_left: String::new(),
+            commit_compare_right: String::new(),
+            issues: vec![],
+            issue_open_only: true,
+            notifications,
+            jobs: vec![],
+            automations: vec![],
+            automation_runs: vec![],
+            health: vec![],
+            local_repos: vec![],
+            local_command_output: None,
+            local_branches: vec![],
+            local_branches_repo: None,
+            milestones: vec![],
+            security_alerts: vec![],
+            release_report: None,
+            local_status: None,
+            local_path: String::new(),
+            audit: vec![],
+            settings_tab: SettingsTab::Appearance,
+            onboarding_step: OnboardingStep::Welcome,
+            onboarding_complete: false,
+            show_shortcuts: false,
+            github_host: "github.com".into(),
+            github_token: String::new(),
+            provider_api_key: String::new(),
+            provider_model_edit: String::new(),
+            provider_endpoint_edit: String::new(),
+            selected_provider: None,
+            routing_drafts,
+            review_policy_draft: ReviewPolicy::default(),
+            ai_question: String::new(),
+            ai_answer: None,
+            ai_use_provider: false,
+            issue_title: String::new(),
+            issue_body: String::new(),
+            issue_repository: None,
+            issue_labels: String::new(),
+            confirmed_delete: String::new(),
+            confirm_action: None,
+            account_menu: false,
+            palette_hint: String::new(),
+        }
+    }
+}

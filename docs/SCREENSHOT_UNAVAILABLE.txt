@@ -1,0 +1,16 @@
+Screenshot capture was attempted after launching the native binary.
+
+Observed:
+- target/debug/gitpilot started successfully
+- demo SQLite profile initialized with 3 repositories and 6 pull requests
+- Window process remained alive during the smoke test
+
+Not available:
+- A screen image. The managed macOS session does not expose a display to
+  `screencapture` ("could not create image from display"), and the elevated
+  attempt did not produce an image file.
+
+Do not treat a mockup as a screenshot. On a normal desktop session run:
+
+    scripts/capture-screenshot.sh docs/screenshot-overview.png
+

@@ -1,0 +1,31 @@
+[package]
+name = "gitpilot-app"
+description = "Native GitPilot desktop application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gitpilot"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+directories.workspace = true
+eframe.workspace = true
+egui.workspace = true
+gitpilot-core = { path = "../gitpilot-core" }
+parking_lot.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+webbrowser.workspace = true
+

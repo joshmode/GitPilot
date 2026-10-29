@@ -1,0 +1,45 @@
+[package]
+name = "gitpilot-core"
+description = "Domain, integration, persistence and AI services for GitPilot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+hmac.workspace = true
+indexmap.workspace = true
+parking_lot.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+webbrowser.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio-util.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process", "fs", "io-util"] }
+
+[features]
+test-support = []
+
