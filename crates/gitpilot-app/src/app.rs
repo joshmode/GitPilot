@@ -292,6 +292,9 @@ impl GitPilotApp {
                 UiEvent::ChangeImpactSignals(signals) => {
                     self.state.change_impact_signals = signals;
                 }
+                UiEvent::AiStreamDelta(delta) => {
+                    self.state.ai_stream_text.push_str(&delta);
+                }
                 UiEvent::DeviceFlow(start) => {
                     self.state.github_device_code = start.device_code.clone();
                     self.state.github_user_code = start.user_code.clone();

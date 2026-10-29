@@ -40,8 +40,8 @@ a production-signed distribution.
 
 ### Known limitations
 
-- Automated AI finding publication, vector retrieval, signed/notarized
-  distribution and VM-grade isolation are intentionally deferred. See
+- Automatic (unattended) AI finding publication, signed/notarized distribution,
+  Windows/Linux packaging validation and VM-grade isolation remain deferred. See
   `FEATURES.md`.
 - Docker/Podman runtime verification was blocked by the managed host daemon;
   Linux credential/packaging paths require target-host validation.

@@ -22,6 +22,7 @@ pub fn show(
         "Evidence-backed repository questions with bounded, project-scoped context",
         |ui| {
             ui.checkbox(&mut state.ai_use_provider, "Use configured provider");
+            ui.checkbox(&mut state.ai_stream_enabled, "Stream provider output");
         },
     );
     if state
@@ -192,24 +193,67 @@ pub fn show(
                 let query = state.ai_question.clone();
                 let repository_id = state.repository_scope.clone();
                 let use_ai = state.ai_use_provider;
+                let stream_enabled = state.ai_stream_enabled;
                 let service = Arc::clone(service);
                 let tx = tx.clone();
                 let cancel = CancellationToken::new();
+                state.ai_stream_text.clear();
                 runtime.spawn(async move {
-                    match service
-                        .ask_workspace(
-                            &query,
-                            repository_id.as_deref(),
-                            use_ai,
-                            &cancel,
-                        )
-                        .await
-                    {
-                        Ok(answer) => {
-                            let _ = tx.send(UiEvent::Explanation(answer));
+                    let stream_enabled = use_ai && stream_enabled;
+                    if stream_enabled {
+                        let (stream_tx, mut stream_rx) =
+                            tokio::sync::mpsc::channel::<
+                                gitpilot_core::Result<gitpilot_core::ai::StreamChunk>,
+                            >(32);
+                        let stream_ui = tx.clone();
+                        let stream_task = tokio::spawn(async move {
+                            while let Some(chunk) = stream_rx.recv().await {
+                                match chunk {
+                                    Ok(chunk) => {
+                                        let _ = stream_ui
+                                            .send(UiEvent::AiStreamDelta(chunk.delta));
+                                    }
+                                    Err(error) => {
+                                        let _ = stream_ui
+                                            .send(UiEvent::Error(error.user_message()));
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                        match service
+                            .ask_workspace_stream(
+                                &query,
+                                repository_id.as_deref(),
+                                &cancel,
+                                stream_tx,
+                            )
+                            .await
+                        {
+                            Ok(answer) => {
+                                let _ = tx.send(UiEvent::Explanation(answer));
+                            }
+                            Err(error) => {
+                                let _ = tx.send(UiEvent::Error(error.user_message()));
+                            }
                         }
-                        Err(error) => {
-                            let _ = tx.send(UiEvent::Error(error.user_message()));
+                        let _ = stream_task.await;
+                    } else {
+                        match service
+                            .ask_workspace(
+                                &query,
+                                repository_id.as_deref(),
+                                use_ai,
+                                &cancel,
+                            )
+                            .await
+                        {
+                            Ok(answer) => {
+                                let _ = tx.send(UiEvent::Explanation(answer));
+                            }
+                            Err(error) => {
+                                let _ = tx.send(UiEvent::Error(error.user_message()));
+                            }
                         }
                     }
                 });
@@ -262,6 +306,15 @@ pub fn show(
                     .size(12.0)
                     .color(tokens.text_muted),
             );
+            if !state.ai_stream_text.is_empty() {
+                ui.collapsing("Streaming trace", |ui| {
+                    ui.label(
+                        RichText::new(&state.ai_stream_text)
+                            .size(10.0)
+                            .color(tokens.text_faint),
+                    );
+                });
+            }
             components::divider(ui, tokens);
             ui.label(
                 RichText::new("EVIDENCE")

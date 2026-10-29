@@ -15,6 +15,12 @@ Structured output is requested per provider rather than assuming every endpoint
 implements one generic JSON mode. The review engine validates returned JSON and
 only persists a finding whose file and line are present in the cached diff.
 
+Streaming is implemented for the documented OpenAI Responses,
+Anthropic Messages, Gemini streaming, OpenAI-compatible chat and Ollama chat
+event formats. The workspace streams text deltas and records the returned token
+usage; the mock provider explicitly reports that it does not stream instead of
+pretending to support it.
+
 ## Endpoints
 
 | Provider | Request path | Auth |

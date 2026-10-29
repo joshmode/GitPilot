@@ -25,7 +25,7 @@ service implementation.
 | Commit explorer | Implemented | Persisted commits, metadata, PR linkage, diff-grounded explanations with uncertainty, review focus and on-demand GitHub commit-file diff viewer |
 | Cross-PR overlap | Implemented | Deterministic shared-file signals; intentionally not labelled as a conflict |
 | Contributor workspace | Implemented | Assignment/review workload, bottleneck signals, CODEOWNERS-backed reviewer suggestions and configurable individual counters; never auto-assigned or used as productivity ranking |
-| Provider adapters | Implemented | Independent OpenAI Responses, Anthropic Messages, Gemini, OpenAI-compatible and Ollama protocols, plus mock |
+| Provider adapters | Implemented | Independent OpenAI Responses, Anthropic Messages, Gemini, OpenAI-compatible and Ollama protocols, plus mock; documented streaming event parsers and cancelling workspace stream |
 | Provider routing/budgets | Implemented | Persisted policies, cost estimates, fallback disclosure fields, usage ledger |
 | Model discovery | Implemented | OpenAI/OpenAI-compatible `/v1/models`, Gemini model-list and Ollama `/api/tags`; Anthropic uses documented explicit model entry |
 | AI code review | Implemented | Deterministic checks, optional structured AI review, confidence/evidence validation, dedupe, lifecycle, persisted runs, file exclusions and review-policy validation |
@@ -50,9 +50,10 @@ service implementation.
 
 1. **No real credentials are included.** Live GitHub and provider operations
    require the user’s accounts and are error-tested with fixtures/mocks.
-2. **AI finding publication is intentionally disabled.** The GUI supports
-   human-authored summary reviews and validated line comments with separate
-   permissions and confirmation. No AI finding is published automatically.
+2. **AI findings are never published automatically.** The GUI requires the user
+   to select findings, preview anchors, provide a summary and confirm a single
+   review submission. Findings without validated diff anchors are included only
+   in that review summary.
 3. **Host execution is not a VM.** The command runner has allow-lists,
    timeouts and environment scrubbing, but the OS process is not a complete
    isolation boundary.
