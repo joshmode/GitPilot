@@ -44,7 +44,7 @@ implemented and tested; `PARTIAL` is documented in FEATURES.md.
 - [x] Evidence and diff-location validation
 - [x] Deduplication, lifecycle and persisted runs
 - [x] Review policies and GUI cockpit
-- [x] Guarded human summary/line-comment publishing in the PR cockpit; AI findings remain private
+- [x] Guarded human summary/line-comment and selected-finding publishing in the PR cockpit
 - [x] Reviewer suggestions from CODEOWNERS/workload evidence; never auto-assigned
 
 ## Milestone 6 — collaboration/memory
@@ -82,4 +82,5 @@ implemented and tested; `PARTIAL` is documented in FEATURES.md.
 - [x] On-demand commit diff viewer and generated-file persistence
 - [x] Commit explanations receive bounded diff hunks and disclose unavailable evidence
 - [x] Cross-platform notification, sandbox, project, webhook and credential-path tests
+- [x] Provider streaming, explanation depth selection, branch overview and saved-view filter round trips
 
